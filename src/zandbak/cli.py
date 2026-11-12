@@ -12,8 +12,8 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import FrameType
 
-from devenv import APP, DevenvError, __version__, config, landlock, protect
-from devenv.plan import Arg, Plan, Request, build
+from zandbak import APP, zandbakError, __version__, config, landlock, protect
+from zandbak.plan import Arg, Plan, Request, build
 
 type SignalHandler = Callable[[int, FrameType | None], object]
 """Signature of a Python signal handler."""
@@ -104,7 +104,7 @@ def _run(bwrap: str, argv: list[str], fds: list[int], *, use_landlock: bool) -> 
     r"""Run bwrap and return its exit status as a shell would report it.
 
     Ctrl-C and Ctrl-\\ reach the whole foreground process group; the sandbox
-    handles them, so devenv itself ignores them. SIGTERM and SIGHUP (terminal
+    handles them, so zandbak itself ignores them. SIGTERM and SIGHUP (terminal
     closed) are forwarded so the sandbox ends and the quarantine check runs.
     """
     with _signals({signal.SIGINT: _ignore, signal.SIGQUIT: _ignore}):
@@ -124,10 +124,10 @@ def _run(bwrap: str, argv: list[str], fds: list[int], *, use_landlock: bool) -> 
 
 
 def _find_bwrap(name: str, *, required: bool) -> str:
-    """Return the bwrap path; raise devenvError if ``required`` and it is missing."""
+    """Return the bwrap path; raise zandbakError if ``required`` and it is missing."""
     path = shutil.which(name)
     if path is None and required:
-        raise DevenvError(f"cannot find {name!r}; install bubblewrap")
+        raise zandbakError(f"cannot find {name!r}; install bubblewrap")
     return path or name
 
 
@@ -150,7 +150,7 @@ def _request(args: argparse.Namespace, cfg: config.Config, cfg_path: Path, bwrap
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run devenv with ``argv`` (default: ``sys.argv``); return the exit status."""
+    """Run zandbak with ``argv`` (default: ``sys.argv``); return the exit status."""
     args = _parser().parse_args(argv)
     if args.dump_config:
         sys.stdout.write(config.default_text())
@@ -160,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg = config.load(cfg_path, explicit=args.config is not None)
         bwrap = _find_bwrap(cfg.bwrap_path, required=not args.dry_run)
         plan = build(_request(args, cfg, cfg_path, bwrap))
-    except DevenvError as e:
+    except zandbakError as e:
         _say(str(e))
         return 2
     for warning in plan.warnings:

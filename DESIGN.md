@@ -1,6 +1,6 @@
-# devenv design
+# zandbak design
 
-devenv starts an AI coding agent inside a
+zandbak starts a process inside a
 [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The agent may
 change the project it was started in and nothing else, and it must not be able
 to plant anything that the host later runs on its own.
@@ -12,11 +12,11 @@ less obvious decisions were made. For usage see `README.md`.
 
 **Assumed hostile:** the agent and everything it runs. A prompt injection in a
 dependency's README is enough to turn a helpful agent into an attacker, so
-devenv assumes it will read every file it can reach, open network
+zandbak assumes it will read every file it can reach, open network
 connections, and plant files designed to be executed later.
 
 **Trusted:** the user, the kernel, `bwrap`, the Python interpreter, and
-devenv's own code and config. devenv checks that the last four are out of
+zandbak's own code and config. zandbak checks that the last four are out of
 the agent's reach.
 
 **Goals**
@@ -61,12 +61,12 @@ side effects (`cli`) stays small.
 The config *is* the security policy, so parsing is strict. Unknown keys are
 errors, because a typo such as `protcet = [...]` must not silently fall back
 to defaults. Types are checked, and every path is normalised and must stay
-relative (no `/`, no `..`). A config that fails to load stops devenv instead
+relative (no `/`, no `..`). A config that fails to load stops zandbak instead
 of being replaced by the defaults.
 
 Rules spanning several fields live in `_validate`. The most important one:
 nothing in `ro` or `ephemeral` may sit *inside* an `rw` entry. The agent can
-create symlinks in `rw` folders, and devenv follows host symlinks when
+create symlinks in `rw` folders, and zandbak follows host symlinks when
 mounting, so a nested entry could be turned into a path to any host file in
 the next session. The safe tool for "read-only part of a writable folder" is
 `protect`, which never follows symlinks.
@@ -96,7 +96,7 @@ mount covers an earlier one:
 8. **Terminal filter**, working directory, and the command after `--`, so a
    command starting with `-` can't be read as a bwrap option.
 
-Before step 6, `_check_self` refuses to run if devenv's own code, its config
+Before step 6, `_check_self` refuses to run if zandbak's own code, its config
 path (even if the file doesn't exist yet), the Python interpreter or bwrap
 lies inside a writable area. Otherwise the agent could switch the
 protections off for the next run.
@@ -128,7 +128,7 @@ protected path, `analyse()` walks its components:
 
 After bwrap exits, `quarantine()` compares watched paths with their startup
 `Identity` (device, inode, type, link target). Changed or new ones are
-renamed to `<name>.devenv-quarantine-<time>`. The rename acts on the path
+renamed to `<name>.zandbak-quarantine-<time>`. The rename acts on the path
 itself, never on a symlink's target. Parents of a watched path were pinned
 and could not be swapped. The PID namespace guarantees every sandboxed
 process is dead by then, so nothing can race the check.
@@ -155,7 +155,7 @@ sandbox instead of the running command. A small BPF filter blocks only
   x86_64, arm on aarch64) and refuses all x32 syscalls;
 * it refuses syscalls from unknown ABIs.
 
-On other architectures devenv falls back to `--new-session` and warns.
+On other architectures zandbak falls back to `--new-session` and warns.
 
 ### landlock.py
 
@@ -166,7 +166,7 @@ screenshots and fake input. Landlock ABI 6 (Linux 6.12+) can scope abstract
 sockets and signals. `restrict_self()` runs between fork and exec of bwrap,
 so the whole sandbox inherits it. It needs `no_new_privs`, which would break
 a setuid bwrap, so `usable()` turns it off in that case. Without Landlock,
-devenv warns and recommends `--no-network`.
+zandbak warns and recommends `--no-network`.
 
 ### cli.py
 
@@ -206,5 +206,5 @@ inside the sandbox, and nothing is written back.
 See "Known limits" in `README.md`. In short: code in the project is untrusted
 output; nested git repositories inside the project aren't protected; the
 agent can read its own credentials and transcripts from all projects;
-quarantine doesn't run if devenv is SIGKILLed; and a shared network
+quarantine doesn't run if zandbak is SIGKILLed; and a shared network
 reaches localhost services.

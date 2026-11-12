@@ -80,7 +80,7 @@ wheels = [
 ]
 
 [[package]]
-name = "devenv"
+name = "zandbak"
 version = "0.2.0"
 source = { editable = "." }
 

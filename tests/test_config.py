@@ -1,7 +1,7 @@
 import pytest
 
-from devenv import DevenvError, config
-from devenv.config import Config
+from zandbak import zandbakError, config
+from zandbak.config import Config
 
 
 def test_defaults_parse_and_are_safe():
@@ -40,13 +40,13 @@ def test_override_replaces_lists_only_where_set():
     ],
 )
 def test_invalid_config_rejected(text):
-    with pytest.raises(DevenvError):
+    with pytest.raises(zandbakError):
         config.parse(text, config.defaults())
 
 
 @pytest.mark.parametrize("path", ["/etc", "../x", ".claude/../../x", "", ".", "./", "a\x00b"])
 def test_bad_paths_rejected(path):
-    with pytest.raises(DevenvError):
+    with pytest.raises(zandbakError):
         config.normalise(path, "t")
 
 
@@ -68,28 +68,28 @@ def test_paths_normalised(path, norm):
     ],
 )
 def test_structural_rules(text, match):
-    with pytest.raises(DevenvError, match=match):
+    with pytest.raises(zandbakError, match=match):
         config.parse(text, config.defaults())
 
 
 def test_invalid_toml():
-    with pytest.raises(DevenvError, match="invalid TOML"):
+    with pytest.raises(zandbakError, match="invalid TOML"):
         config.parse("= =", Config())
 
 
 def test_load_missing_file(tmp_path):
     assert config.load(tmp_path / "nope.toml", explicit=False) == config.defaults()
-    with pytest.raises(DevenvError, match="not found"):
+    with pytest.raises(zandbakError, match="not found"):
         config.load(tmp_path / "nope.toml", explicit=True)
 
 
 def test_load_error_is_fatal_not_fallback(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text("network = maybe")
-    with pytest.raises(DevenvError, match=str(p)):
+    with pytest.raises(zandbakError, match=str(p)):
         config.load(p, explicit=False)
 
 
 def test_default_path_uses_xdg(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    assert config.default_path() == tmp_path / "devenv" / "config.toml"
+    assert config.default_path() == tmp_path / "zandbak" / "config.toml"

@@ -2,7 +2,7 @@ import tomllib
 
 import pytest
 
-from devenv import cli, config
+from zandbak import cli, config
 
 
 @pytest.fixture
@@ -38,13 +38,13 @@ def test_missing_explicit_config_exits_2(tmp_path):
 @pytest.mark.usefixtures("at")
 def test_dry_run_and_passthrough(capsys):
     assert cli.main(["--dry-run", "-c", "claude", "--", "--model", "x y"]) == 0
-    assert capsys.readouterr().out.rstrip().endswith("devenv claude --model 'x y'")
+    assert capsys.readouterr().out.rstrip().endswith("zandbak claude --model 'x y'")
 
 
 @pytest.mark.usefixtures("at")
 def test_configured_command_gets_extra_args(capsys):
     assert cli.main(["--dry-run", "--", "-x"]) == 0
-    assert capsys.readouterr().out.rstrip().endswith("devenv bash -x")
+    assert capsys.readouterr().out.rstrip().endswith("zandbak bash -x")
 
 
 @pytest.mark.usefixtures("at")

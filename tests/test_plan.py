@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from devenv import DevenvError, plan
+from zandbak import zandbakError, plan
 from tests.helpers import build, cfg_with, index_of, pairs, strargs
 
 # --- project directory checks -------------------------------------------
@@ -10,25 +10,25 @@ from tests.helpers import build, cfg_with, index_of, pairs, strargs
 
 def test_refuses_home_as_project(env):
     home, _ = env
-    with pytest.raises(DevenvError, match="contains your home"):
+    with pytest.raises(zandbakError, match="contains your home"):
         build(home=home, cwd=home)
 
 
 def test_refuses_ancestor_of_home(env):
     home, _ = env
-    with pytest.raises(DevenvError, match="contains your home"):
+    with pytest.raises(zandbakError, match="contains your home"):
         build(home=home, cwd=home.parent)
 
 
 def test_refuses_root(env):
     home, _ = env
-    with pytest.raises(DevenvError):
+    with pytest.raises(zandbakError):
         build(home=home, cwd="/")
 
 
 def test_refuses_dot_dir_project(env):
     home, _ = env
-    with pytest.raises(DevenvError, match="dot-directories"):
+    with pytest.raises(zandbakError, match="dot-directories"):
         build(home=home, cwd=home / ".claude")
 
 
@@ -58,13 +58,13 @@ def test_missing_home_entries_skipped(env):
 def test_home_entry_resolving_to_home_refused(env):
     home, proj = env
     (home / ".evil").symlink_to(home)
-    with pytest.raises(DevenvError, match="whole home"):
+    with pytest.raises(zandbakError, match="whole home"):
         build(cfg_with('[home]\nro = [".evil"]'), home=home, cwd=proj)
 
 
 def test_ephemeral_must_be_file(env):
     home, proj = env
-    with pytest.raises(DevenvError, match="regular file"):
+    with pytest.raises(zandbakError, match="regular file"):
         build(cfg_with('[home]\nephemeral = [".claude"]\nrw = []'), home=home, cwd=proj)
 
 
@@ -170,7 +170,7 @@ def test_ro_dir_refused(env, which, match):
         "missing": "/nonexistent",
         "inproj": "sub",
     }[which]
-    with pytest.raises(DevenvError, match=match):
+    with pytest.raises(zandbakError, match=match):
         build(home=home, cwd=proj, ro_dirs=[d])
 
 
@@ -179,7 +179,7 @@ def test_ro_dir_planted_symlink_refused(env):
     docs = home / "Documents"
     docs.mkdir()
     (proj / "vendor").symlink_to(docs)
-    with pytest.raises(DevenvError, match="via a symlink"):
+    with pytest.raises(zandbakError, match="via a symlink"):
         build(home=home, cwd=proj, ro_dirs=["vendor"])
 
 
@@ -255,7 +255,7 @@ def test_command_args_not_reparsed(env):
     home, proj = env
     a = strargs(build(home=home, cwd=proj, command=["claude", "a b", "$(id)", ";rm -rf ~"]))
     tail = a[a.index("--") + 1 :]
-    assert tail == ["bash", "-i", "-c", '"$@"', "devenv", "claude", "a b", "$(id)", ";rm -rf ~"]
+    assert tail == ["bash", "-i", "-c", '"$@"', "zandbak", "claude", "a b", "$(id)", ";rm -rf ~"]
 
 
 def test_command_starting_with_dash_is_safe(env):
@@ -268,16 +268,16 @@ def test_command_starting_with_dash_is_safe(env):
 
 
 @pytest.mark.parametrize("where", ["project", "home_rw", "missing_cfg"])
-def test_refuses_when_devenv_is_writable(env, where):
+def test_refuses_when_zandbak_is_writable(env, where):
     home, proj = env
     (home / ".config").mkdir()
     cfg = cfg_with('[home]\nro = []\nrw = [".config"]')
     target = {
-        "project": proj / "venv" / "devenv",
-        "home_rw": home / ".config" / "devenv" / "config.toml",
+        "project": proj / "venv" / "zandbak",
+        "home_rw": home / ".config" / "zandbak" / "config.toml",
         "missing_cfg": home / ".config" / "nothere" / "config.toml",
     }[where]
-    with pytest.raises(DevenvError, match="disable devenv"):
+    with pytest.raises(zandbakError, match="disable zandbak"):
         build(cfg, home=home, cwd=proj, self_paths=(target,))
 
 

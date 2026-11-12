@@ -1,8 +1,8 @@
-# devenv
+# zandbak
 
-*devenv* is Dutch for sandbox. It runs AI coding agents (Claude Code, Gemini CLI, Goose, ...) inside a
-[bubblewrap](https://github.com/containers/bubblewrap) sandbox. The agent can
-write to the project directory you start it in, and to nothing else you
+*zandbak* is Dutch for sandbox. It can run developer tools and AI coding agents
+inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The agent
+can write to the project directory you start it in, and to nothing else you
 haven't listed.
 
 A Python rewrite of [umago/bubblewrap-ai](https://github.com/umago/bubblewrap-ai)
@@ -17,24 +17,24 @@ Linux 6.12+ is recommended (see *Abstract sockets* below).
 ## Install
 
 ```sh
-pipx install git+https://example.invalid/you/devenv   # or: pipx install .
+pipx install git+https://example.invalid/you/zandbak   # or: pipx install .
 ```
 
 Install it somewhere the sandbox can't write (pipx's default is fine, as
-long as you don't make `~/.local` writable). devenv refuses to start if its
+long as you don't make `~/.local` writable). zandbak refuses to start if its
 own code, its config, Python or bwrap would be writable inside the sandbox.
 
 ## Usage
 
 ```sh
 cd ~/src/my-project
-devenv                          # sandboxed bash shell with a [🫧] prompt
-devenv -c claude                # run an agent directly
-devenv -c goose -- session -r   # arguments after -- are passed through as-is
-devenv --ro-dir ../shared-lib   # expose another folder read-only (repeatable)
-devenv --no-network             # cut the network for this run
-devenv --allow-git-writes       # let the agent change .git/config and hooks
-devenv --dry-run                # print the bwrap command
+zandbak                          # sandboxed bash shell with a [🫧] prompt
+zandbak -c claude                # run an agent directly
+zandbak -c goose -- session -r   # arguments after -- are passed through as-is
+zandbak --ro-dir ../shared-lib   # expose another folder read-only (repeatable)
+zandbak --no-network             # cut the network for this run
+zandbak --allow-git-writes       # let the agent change .git/config and hooks
+zandbak --dry-run                # print the bwrap command
 ```
 
 ## What the sandbox sees
@@ -49,15 +49,15 @@ devenv --dry-run                # print the bwrap command
 | Network | shared by default; `--no-network` isolates it |
 | Processes, IPC, hostname | separate namespaces; no capabilities |
 
-devenv refuses to start in `$HOME`, `/`, any parent of `$HOME`, or a
+zandbak refuses to start in `$HOME`, `/`, any parent of `$HOME`, or a
 dot-directory, and refuses `--ro-dir` paths that would expose those.
 
 ## Configuration
 
-`~/.config/devenv/config.toml` (or `--config FILE`). Start from the defaults:
+`~/.config/zandbak/config.toml` (or `--config FILE`). Start from the defaults:
 
 ```sh
-mkdir -p ~/.config/devenv && devenv --dump-config > ~/.config/devenv/config.toml
+mkdir -p ~/.config/zandbak && zandbak --dump-config > ~/.config/zandbak/config.toml
 ```
 
 The default file is commented. Keys you set replace the default (lists are
@@ -84,8 +84,8 @@ git hooks and `core.fsmonitor`, agent hooks and MCP servers, direnv.
   folders are pinned (mount points can't be renamed or deleted, so the agent
   can't swap `.git` for a copy it controls).
 - **Missing** ones are watched. If the agent creates one (say
-  `.claude/settings.json` with a hook), devenv renames it to
-  `*.devenv-quarantine-<time>` after the session and tells you.
+  `.claude/settings.json` with a hook), zandbak renames it to
+  `*.zandbak-quarantine-<time>` after the session and tells you.
 - **Symlinks** are never followed when mounting (a link planted in an earlier
   session could otherwise pull any host file into the sandbox). They're
   watched instead.
@@ -98,7 +98,7 @@ Two other protections:
   Ctrl-C still works normally.
 - **Abstract sockets.** With a shared network, the host's abstract UNIX
   sockets are reachable, including the X11 display, which on many desktops
-  accepts any process running as your user. On Linux 6.12+ devenv blocks them
+  accepts any process running as your user. On Linux 6.12+ zandbak blocks them
   with Landlock scoping. On older kernels it warns, and `--no-network` is
   the fix.
 
@@ -120,7 +120,7 @@ Read these before you trust it with something important.
 - **Network.** With the default shared network the agent can reach services
   on localhost (databases, Docker's TCP API, Jupyter, ...) and send data
   anywhere. Use `--no-network` for untrusted code.
-- **Quarantine runs when devenv exits.** If devenv is killed with SIGKILL the
+- **Quarantine runs when zandbak exits.** If zandbak is killed with SIGKILL the
   check doesn't run, and a host tool running *during* the session could load
   a just-planted file. Files you create yourself during a session (e.g.
   VS Code making `.vscode`) are quarantined too. Restore them by renaming.

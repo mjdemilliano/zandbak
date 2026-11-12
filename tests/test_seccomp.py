@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from devenv import seccomp as sc
+from zandbak import seccomp as sc
 
 
 def run_bpf(prog: bytes, nr: int, arch: int, args: tuple[int, ...] = ()) -> int:

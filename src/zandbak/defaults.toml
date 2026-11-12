@@ -1,6 +1,6 @@
-# devenv default configuration.
+# zandbak default configuration.
 #
-# Copy it with `devenv --dump-config > ~/.config/devenv/config.toml` and edit.
+# Copy it with `zandbak --dump-config > ~/.config/zandbak/config.toml` and edit.
 # Any key you set replaces the default value for that key (lists are not
 # merged), so copy the full list when you only want to add one entry.
 
@@ -11,11 +11,11 @@ bwrap_path = "bwrap"
 command = ["bash"]
 
 # Share the host network. Agents need it to reach their APIs.
-# `devenv --no-network` turns it off for one run.
+# `zandbak --no-network` turns it off for one run.
 network = true
 
 # Extra arguments passed to bwrap verbatim, one argument per list element.
-# They are applied before devenv's own protections, so they cannot undo them.
+# They are applied before zandbak's own protections, so they cannot undo them.
 bwrap_extra_args = []
 
 # Host environment variables passed into the sandbox. Everything else is
@@ -57,7 +57,7 @@ ephemeral = [".claude.json"]
 # Paths inside the writable areas above that are mounted read-only, because
 # their contents run on the host later (hooks, MCP servers, plugins).
 # A protected path that does not exist yet is watched instead: if the agent
-# creates it, devenv renames it to *.devenv-quarantine-<time> after the session.
+# creates it, zandbak renames it to *.zandbak-quarantine-<time> after the session.
 protect = [
   ".claude/settings.json",
   ".claude/settings.local.json",
@@ -73,10 +73,10 @@ protect = [
 ]
 
 [project]
-# Paths relative to the project directory (where you run devenv) that are
+# Paths relative to the project directory (where you run zandbak) that are
 # protected the same way. These are files that run code on the host
 # without you explicitly running project code.
-# `devenv --allow-git-writes` drops the .git entries for one run.
+# `zandbak --allow-git-writes` drops the .git entries for one run.
 protect = [
   ".git/config",
   ".git/hooks",

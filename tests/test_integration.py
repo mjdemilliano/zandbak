@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from devenv import landlock
+from zandbak import landlock
 
 
 def _bwrap_works():
@@ -41,7 +41,7 @@ def run(env, tmp_path):
             "TERM": "dumb",
         }
         return subprocess.run(
-            [sys.executable, "-m", "devenv", *args],
+            [sys.executable, "-m", "zandbak", *args],
             cwd=cwd,
             env=e,
             stdin=stdin,
@@ -162,7 +162,7 @@ def test_refuses_home(run, env):
 
 @pytest.mark.skipif(landlock.abi_version() < landlock.MIN_ABI, reason="Landlock ABI 6 unavailable")
 def test_abstract_socket_blocked(run):
-    name = f"devenv-test-{os.getpid()}"
+    name = f"zandbak-test-{os.getpid()}"
     srv = socket.socket(socket.AF_UNIX)
     srv.bind("\0" + name)
     srv.listen()

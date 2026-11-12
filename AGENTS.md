@@ -1,16 +1,16 @@
 # AGENTS.md
 
-devenv runs AI coding agents in a bubblewrap sandbox. It is security
-software: when correctness and convenience conflict, choose correctness and
-say so.
+zandbak is a safe environment for running AI agents and projects in a bubblewrap
+sandbox. It is security software: when correctness and convenience conflict,
+choose correctness and say so.
 
 ## Layout
 
-- `src/devenv/plan.py`: builds the bwrap argv. Pure; mount order matters.
-- `src/devenv/protect.py`: protected paths and post-session quarantine.
-- `src/devenv/config.py`: strict TOML policy; defaults in `defaults.toml`.
-- `src/devenv/seccomp.py`, `landlock.py`: kernel hardening.
-- `src/devenv/cli.py`: the only module that starts processes.
+- `src/zandbak/plan.py`: builds the bwrap argv. Pure; mount order matters.
+- `src/zandbak/protect.py`: protected paths and post-session quarantine.
+- `src/zandbak/config.py`: strict TOML policy; defaults in `defaults.toml`.
+- `src/zandbak/seccomp.py`, `landlock.py`: kernel hardening.
+- `src/zandbak/cli.py`: the only module that starts processes.
 - `DESIGN.md` explains why things are the way they are. Read it before
   changing mount order, protections or the threat model.
 

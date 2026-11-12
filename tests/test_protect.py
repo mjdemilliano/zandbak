@@ -1,7 +1,7 @@
 import os
 import time
 
-from devenv import protect
+from zandbak import protect
 
 
 def test_existing_path_is_ro_and_parents_pinned(tmp_path):
@@ -60,7 +60,7 @@ def test_quarantines_created(tmp_path):
     assert len(notes) == 1
     assert "quarantined" in notes[0]
     assert not (tmp_path / ".mcp.json").exists()
-    assert len(list(tmp_path.glob(".mcp.json.devenv-quarantine-*"))) == 1
+    assert len(list(tmp_path.glob(".mcp.json.zandbak-quarantine-*"))) == 1
 
 
 def test_quarantines_retargeted_symlink(tmp_path):
@@ -102,11 +102,11 @@ def test_name_collision(tmp_path, monkeypatch):
     time.tzset()
     p = protect.analyse(tmp_path, ".mcp.json")
     stamp = "19700101-000000"
-    (tmp_path / f".mcp.json.devenv-quarantine-{stamp}").write_text("old")
+    (tmp_path / f".mcp.json.zandbak-quarantine-{stamp}").write_text("old")
     (tmp_path / ".mcp.json").write_text("new")
     protect.quarantine([p], now=0)
-    assert (tmp_path / f".mcp.json.devenv-quarantine-{stamp}").read_text() == "old"
-    assert (tmp_path / f".mcp.json.devenv-quarantine-{stamp}-2").read_text() == "new"
+    assert (tmp_path / f".mcp.json.zandbak-quarantine-{stamp}").read_text() == "old"
+    assert (tmp_path / f".mcp.json.zandbak-quarantine-{stamp}-2").read_text() == "new"
 
 
 def test_rename_failure_reported(tmp_path, monkeypatch):

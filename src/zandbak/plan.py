@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
-from devenv import APP, DevenvError, protect, seccomp
-from devenv.config import Config, HomeConfig
+from zandbak import APP, zandbakError, protect, seccomp
+from zandbak.config import Config, HomeConfig
 
 RC_PATH = f"/tmp/{APP}-rc.sh"  # noqa: S108 - inside the sandbox's private /tmp
 """Where the bash prompt script is written inside the sandbox."""
@@ -113,7 +113,7 @@ class Request:
     home: Path
     """The user's home directory."""
     cwd: Path
-    """Where devenv was started; becomes the project directory."""
+    """Where zandbak was started; becomes the project directory."""
     environ: Mapping[str, str]
     """The host environment, filtered through ``env_allow``."""
     command: tuple[str, ...]
@@ -125,11 +125,11 @@ class Request:
     allow_git_writes: bool = False
     """Skip the project's ``.git`` protections."""
     landlock: bool = False
-    """Landlock scoping is usable (see :func:`devenv.landlock.usable`)."""
+    """Landlock scoping is usable (see :func:`zandbak.landlock.usable`)."""
     machine: str = field(default_factory=platform.machine)
     """CPU architecture, for the seccomp filter."""
     self_paths: tuple[Path, ...] = ()
-    """devenv's code, config, Python and bwrap: these must stay out of the agent's reach."""
+    """zandbak's code, config, Python and bwrap: these must stay out of the agent's reach."""
     interactive: bool = True
     """stdin is a terminal, so run the command under an interactive shell."""
 
@@ -143,7 +143,7 @@ class Plan:
     fds: list[FdSource] = field(default_factory=list)
     """Descriptors to open and pass; referenced from :attr:`argv` by :class:`FdRef`."""
     protections: list[protect.Protection] = field(default_factory=list)
-    """Protected paths, for the post-session :func:`devenv.protect.quarantine`."""
+    """Protected paths, for the post-session :func:`zandbak.protect.quarantine`."""
     warnings: list[str] = field(default_factory=list)
     """Messages to show before starting."""
     landlock: bool = False
@@ -172,12 +172,12 @@ def _in_dot_dir(path: Path, home: Path) -> str | None:
 def check_project(project: Path, home: Path) -> None:
     """Refuse project directories that would expose home or its dot-directories."""
     if home.is_relative_to(project):
-        raise DevenvError(
+        raise zandbakError(
             f"refusing to use {project} as the project directory: it contains your home "
-            "directory, which would become writable. Run devenv inside a project folder."
+            "directory, which would become writable. Run zandbak inside a project folder."
         )
     if top := _in_dot_dir(project, home):
-        raise DevenvError(
+        raise zandbakError(
             f"refusing to use {project} as the project directory: it is inside ~/{top}, "
             "and dot-directories are governed by the [home] allowlist."
         )
@@ -192,20 +192,20 @@ def resolve_ro_dir(given: str, project: Path, home: Path) -> Path:
     try:
         real = lexical.resolve(strict=True)
     except OSError as e:
-        raise DevenvError(f"--ro-dir {given}: {e.strerror}") from None
+        raise zandbakError(f"--ro-dir {given}: {e.strerror}") from None
     if home.is_relative_to(real):
-        raise DevenvError(f"--ro-dir {given}: {real} contains your home directory")
+        raise zandbakError(f"--ro-dir {given}: {real} contains your home directory")
     if top := _in_dot_dir(real, home):
-        raise DevenvError(f"--ro-dir {given}: {real} is inside ~/{top}; use [home] instead")
+        raise zandbakError(f"--ro-dir {given}: {real} is inside ~/{top}; use [home] instead")
     if lexical.is_relative_to(project) and not real.is_relative_to(project):
         # Inside the agent-writable project but leading out of it: probably a
         # symlink the agent planted in an earlier session.
-        raise DevenvError(
+        raise zandbakError(
             f"--ro-dir {given}: lies inside the project but resolves to {real} "
             "via a symlink; pass the real path if you mean it"
         )
     if real.is_relative_to(project):
-        raise DevenvError(f"--ro-dir {given}: already visible as part of the project")
+        raise zandbakError(f"--ro-dir {given}: already visible as part of the project")
     return real
 
 
@@ -275,7 +275,7 @@ def _mount_home(plan: Plan, cfg: HomeConfig, home: Path) -> dict[str, Access]:
             continue
         real = host.resolve()
         if home.is_relative_to(real):
-            raise DevenvError(f"~/{rel} resolves to {real}, which would expose your whole home")
+            raise zandbakError(f"~/{rel} resolves to {real}, which would expose your whole home")
         plan.warnings += _home_warnings(rel, access)
         match access:
             case Access.RO:
@@ -284,7 +284,7 @@ def _mount_home(plan: Plan, cfg: HomeConfig, home: Path) -> dict[str, Access]:
                 plan.argv += ["--bind", str(real), str(host)]
             case Access.EPHEMERAL:
                 if not real.is_file():
-                    raise DevenvError(f"home.ephemeral entry ~/{rel} must be a regular file")
+                    raise zandbakError(f"home.ephemeral entry ~/{rel} must be a regular file")
                 plan.argv += ["--file", plan.fd(real), str(host)]
         mounted[rel] = access
     return mounted
@@ -307,7 +307,7 @@ def _mount_project(plan: Plan, req: Request, project: Path, home: Path) -> None:
 
 
 def _check_self(self_paths: tuple[Path, ...], writable: list[Path]) -> None:
-    """Refuse to run if the agent could modify devenv itself.
+    """Refuse to run if the agent could modify zandbak itself.
 
     Otherwise it could disable the protections for the next run. A config
     file that doesn't exist yet counts too: the agent could create it.
@@ -316,9 +316,9 @@ def _check_self(self_paths: tuple[Path, ...], writable: list[Path]) -> None:
         real = path.resolve()
         for area in writable:
             if real.is_relative_to(area):
-                raise DevenvError(
+                raise zandbakError(
                     f"{path} would be writable inside the sandbox (via {area}); the agent "
-                    "could disable devenv's protections. Keep devenv, its config, "
+                    "could disable zandbak's protections. Keep zandbak, its config, "
                     "Python and bwrap outside writable paths."
                 )
 

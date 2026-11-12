@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from devenv import config, plan
+from zandbak import config, plan
 
 
 def build(cfg=None, *, home, cwd, command=("bash",), **kw) -> plan.Plan:

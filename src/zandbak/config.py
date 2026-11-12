@@ -12,7 +12,7 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from devenv import APP, DevenvError
+from zandbak import APP, zandbakError
 
 type Table = dict[str, Any]
 """A parsed TOML table."""
@@ -37,7 +37,7 @@ class HomeConfig:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProjectConfig:
-    """Policy for the project directory (where devenv is started)."""
+    """Policy for the project directory (where zandbak is started)."""
 
     protect: Paths = ()
     """Paths relative to the project that are kept read-only or quarantined."""
@@ -54,7 +54,7 @@ class Config:
     network: bool = True
     """Whether the sandbox shares the host network."""
     bwrap_extra_args: tuple[str, ...] = ()
-    """Extra bwrap arguments, applied before devenv's protections."""
+    """Extra bwrap arguments, applied before zandbak's protections."""
     env_allow: tuple[str, ...] = ()
     """Host environment variables copied into the otherwise empty environment."""
     home: HomeConfig = field(default_factory=HomeConfig)
@@ -75,30 +75,30 @@ def default_path() -> Path:
 
 
 def normalise(path: str, where: str) -> str:
-    """Return ``path`` as a clean relative path, or raise devenvError.
+    """Return ``path`` as a clean relative path, or raise zandbakError.
 
     Rejects absolute paths, ``..``, NUL bytes and paths naming the base
     directory itself, so an entry can never point outside its base.
     """
     if not path or "\x00" in path:
-        raise DevenvError(f"{where}: invalid path {path!r}")
+        raise zandbakError(f"{where}: invalid path {path!r}")
     pure = PurePosixPath(path)
     if pure.is_absolute() or ".." in pure.parts or pure == PurePosixPath():
-        raise DevenvError(f"{where}: {path!r} must be a relative path inside the base directory")
+        raise zandbakError(f"{where}: {path!r} must be a relative path inside the base directory")
     return pure.as_posix()
 
 
 def _check_keys(table: Table, cls: type, where: str) -> None:
     """Reject keys in ``table`` that are not fields of dataclass ``cls``."""
     if unknown := table.keys() - {f.name for f in fields(cls)}:
-        raise DevenvError(f"unknown key {where}{min(unknown)}")
+        raise zandbakError(f"unknown key {where}{min(unknown)}")
 
 
 def _table(data: Table, key: str) -> Table:
     """Return sub-table ``key`` of ``data`` (empty if absent)."""
     value = data.get(key, {})
     if not isinstance(value, dict):
-        raise DevenvError(f"[{key}] must be a table")
+        raise zandbakError(f"[{key}] must be a table")
     return value
 
 
@@ -106,7 +106,7 @@ def _get[T: (str, bool)](table: Table, key: str, default: T) -> T:
     """Return scalar ``table[key]`` if present, checking it has ``default``'s type."""
     value = table.get(key, default)
     if type(value) is not type(default):
-        raise DevenvError(f"{key}: expected {type(default).__name__}")
+        raise zandbakError(f"{key}: expected {type(default).__name__}")
     return value
 
 
@@ -116,7 +116,7 @@ def _strings(table: Table, key: str, default: tuple[str, ...], where: str) -> tu
         return default
     value = table[key]
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise DevenvError(f"{where}{key}: expected a list of strings")
+        raise zandbakError(f"{where}{key}: expected a list of strings")
     return tuple(value)
 
 
@@ -128,19 +128,19 @@ def _paths(table: Table, key: str, default: Paths, where: str) -> Paths:
 def _validate(cfg: Config) -> Config:
     """Check rules that span several fields; return ``cfg`` unchanged."""
     if not cfg.command or not cfg.bwrap_path:
-        raise DevenvError("command and bwrap_path must not be empty")
+        raise zandbakError("command and bwrap_path must not be empty")
     for name in cfg.env_allow:
         if not name or "=" in name or "\x00" in name:
-            raise DevenvError(f"env_allow: invalid variable name {name!r}")
+            raise zandbakError(f"env_allow: invalid variable name {name!r}")
     home = cfg.home
     mounted = [*home.ro, *home.rw, *home.ephemeral]
     if dupes := {p for p in mounted if mounted.count(p) > 1}:
-        raise DevenvError(f"[home]: listed more than once: {sorted(dupes)}")
+        raise zandbakError(f"[home]: listed more than once: {sorted(dupes)}")
     for rw in home.rw:
         for path in mounted:
             if path != rw and PurePosixPath(path).is_relative_to(rw):
-                # devenv would follow symlinks the agent can plant inside rw.
-                raise DevenvError(
+                # zandbak would follow symlinks the agent can plant inside rw.
+                raise zandbakError(
                     f"[home]: {path!r} is inside writable {rw!r}; "
                     "use home.protect to keep part of it read-only"
                 )
@@ -152,7 +152,7 @@ def parse(text: str, base: Config) -> Config:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DevenvError(f"invalid TOML: {e}") from e
+        raise zandbakError(f"invalid TOML: {e}") from e
     home_t, project_t = _table(data, "home"), _table(data, "project")
     _check_keys(data, Config, "")
     _check_keys(home_t, HomeConfig, "home.")
@@ -194,11 +194,11 @@ def load(path: Path, *, explicit: bool) -> Config:
         text = path.read_text("utf-8")
     except FileNotFoundError:
         if explicit:
-            raise DevenvError(f"{path}: file not found") from None
+            raise zandbakError(f"{path}: file not found") from None
         return defaults()
     except OSError as e:
-        raise DevenvError(f"{path}: {e.strerror}") from e
+        raise zandbakError(f"{path}: {e.strerror}") from e
     try:
         return parse(text, defaults())
-    except DevenvError as e:
-        raise DevenvError(f"{path}: {e}") from e
+    except zandbakError as e:
+        raise zandbakError(f"{path}: {e}") from e

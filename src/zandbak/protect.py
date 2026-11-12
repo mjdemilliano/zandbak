@@ -17,7 +17,7 @@ git hooks and config, agent hooks and MCP servers, ``.envrc``...
 
 After the sandbox exits (the PID namespace guarantees every process in it is
 dead), :func:`quarantine` renames watched components that appeared or changed
-to ``<name>.devenv-quarantine-<time>``, so the host never loads them.
+to ``<name>.zandbak-quarantine-<time>``, so the host never loads them.
 """
 
 import stat
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from devenv import APP
+from zandbak import APP
 
 type Bind = tuple[Path, Path]
 """A bind mount: (host source, sandbox destination)."""
