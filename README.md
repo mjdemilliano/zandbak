@@ -17,7 +17,7 @@ Linux 6.12+ is recommended (see *Abstract sockets* below).
 ## Install
 
 ```sh
-pipx install git+https://example.invalid/you/zandbak   # or: pipx install .
+pipx install git+https://github.com/mjdemilliano/zandbak   # or: pipx install .
 ```
 
 Install it somewhere the sandbox can't write (pipx's default is fine, as
