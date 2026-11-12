@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import FrameType
 
-from devenv import APP, devenvError, __version__, config, landlock, protect
+from devenv import APP, DevenvError, __version__, config, landlock, protect
 from devenv.plan import Arg, Plan, Request, build
 
 type SignalHandler = Callable[[int, FrameType | None], object]
@@ -127,7 +127,7 @@ def _find_bwrap(name: str, *, required: bool) -> str:
     """Return the bwrap path; raise devenvError if ``required`` and it is missing."""
     path = shutil.which(name)
     if path is None and required:
-        raise devenvError(f"cannot find {name!r}; install bubblewrap")
+        raise DevenvError(f"cannot find {name!r}; install bubblewrap")
     return path or name
 
 
@@ -160,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg = config.load(cfg_path, explicit=args.config is not None)
         bwrap = _find_bwrap(cfg.bwrap_path, required=not args.dry_run)
         plan = build(_request(args, cfg, cfg_path, bwrap))
-    except devenvError as e:
+    except DevenvError as e:
         _say(str(e))
         return 2
     for warning in plan.warnings:

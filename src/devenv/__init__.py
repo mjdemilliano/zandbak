@@ -7,5 +7,5 @@ APP = "devenv"
 """Program name, used in messages, file names and the config path."""
 
 
-class devenvError(Exception):
+class DevenvError(Exception):
     """A problem the user must fix; the message is shown as-is and devenv exits."""

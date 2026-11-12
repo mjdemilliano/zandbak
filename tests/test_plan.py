@@ -2,33 +2,33 @@ from pathlib import Path
 
 import pytest
 
+from devenv import DevenvError, plan
 from tests.helpers import build, cfg_with, index_of, pairs, strargs
-from devenv import devenvError, plan
 
 # --- project directory checks -------------------------------------------
 
 
 def test_refuses_home_as_project(env):
     home, _ = env
-    with pytest.raises(devenvError, match="contains your home"):
+    with pytest.raises(DevenvError, match="contains your home"):
         build(home=home, cwd=home)
 
 
 def test_refuses_ancestor_of_home(env):
     home, _ = env
-    with pytest.raises(devenvError, match="contains your home"):
+    with pytest.raises(DevenvError, match="contains your home"):
         build(home=home, cwd=home.parent)
 
 
 def test_refuses_root(env):
     home, _ = env
-    with pytest.raises(devenvError):
+    with pytest.raises(DevenvError):
         build(home=home, cwd="/")
 
 
 def test_refuses_dot_dir_project(env):
     home, _ = env
-    with pytest.raises(devenvError, match="dot-directories"):
+    with pytest.raises(DevenvError, match="dot-directories"):
         build(home=home, cwd=home / ".claude")
 
 
@@ -58,13 +58,13 @@ def test_missing_home_entries_skipped(env):
 def test_home_entry_resolving_to_home_refused(env):
     home, proj = env
     (home / ".evil").symlink_to(home)
-    with pytest.raises(devenvError, match="whole home"):
+    with pytest.raises(DevenvError, match="whole home"):
         build(cfg_with('[home]\nro = [".evil"]'), home=home, cwd=proj)
 
 
 def test_ephemeral_must_be_file(env):
     home, proj = env
-    with pytest.raises(devenvError, match="regular file"):
+    with pytest.raises(DevenvError, match="regular file"):
         build(cfg_with('[home]\nephemeral = [".claude"]\nrw = []'), home=home, cwd=proj)
 
 
@@ -170,7 +170,7 @@ def test_ro_dir_refused(env, which, match):
         "missing": "/nonexistent",
         "inproj": "sub",
     }[which]
-    with pytest.raises(devenvError, match=match):
+    with pytest.raises(DevenvError, match=match):
         build(home=home, cwd=proj, ro_dirs=[d])
 
 
@@ -179,7 +179,7 @@ def test_ro_dir_planted_symlink_refused(env):
     docs = home / "Documents"
     docs.mkdir()
     (proj / "vendor").symlink_to(docs)
-    with pytest.raises(devenvError, match="via a symlink"):
+    with pytest.raises(DevenvError, match="via a symlink"):
         build(home=home, cwd=proj, ro_dirs=["vendor"])
 
 
@@ -277,7 +277,7 @@ def test_refuses_when_devenv_is_writable(env, where):
         "home_rw": home / ".config" / "devenv" / "config.toml",
         "missing_cfg": home / ".config" / "nothere" / "config.toml",
     }[where]
-    with pytest.raises(devenvError, match="disable devenv"):
+    with pytest.raises(DevenvError, match="disable devenv"):
         build(cfg, home=home, cwd=proj, self_paths=(target,))
 
 

@@ -12,7 +12,7 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from devenv import APP, devenvError
+from devenv import APP, DevenvError
 
 type Table = dict[str, Any]
 """A parsed TOML table."""
@@ -81,24 +81,24 @@ def normalise(path: str, where: str) -> str:
     directory itself, so an entry can never point outside its base.
     """
     if not path or "\x00" in path:
-        raise devenvError(f"{where}: invalid path {path!r}")
+        raise DevenvError(f"{where}: invalid path {path!r}")
     pure = PurePosixPath(path)
     if pure.is_absolute() or ".." in pure.parts or pure == PurePosixPath():
-        raise devenvError(f"{where}: {path!r} must be a relative path inside the base directory")
+        raise DevenvError(f"{where}: {path!r} must be a relative path inside the base directory")
     return pure.as_posix()
 
 
 def _check_keys(table: Table, cls: type, where: str) -> None:
     """Reject keys in ``table`` that are not fields of dataclass ``cls``."""
     if unknown := table.keys() - {f.name for f in fields(cls)}:
-        raise devenvError(f"unknown key {where}{min(unknown)}")
+        raise DevenvError(f"unknown key {where}{min(unknown)}")
 
 
 def _table(data: Table, key: str) -> Table:
     """Return sub-table ``key`` of ``data`` (empty if absent)."""
     value = data.get(key, {})
     if not isinstance(value, dict):
-        raise devenvError(f"[{key}] must be a table")
+        raise DevenvError(f"[{key}] must be a table")
     return value
 
 
@@ -106,7 +106,7 @@ def _get[T: (str, bool)](table: Table, key: str, default: T) -> T:
     """Return scalar ``table[key]`` if present, checking it has ``default``'s type."""
     value = table.get(key, default)
     if type(value) is not type(default):
-        raise devenvError(f"{key}: expected {type(default).__name__}")
+        raise DevenvError(f"{key}: expected {type(default).__name__}")
     return value
 
 
@@ -116,7 +116,7 @@ def _strings(table: Table, key: str, default: tuple[str, ...], where: str) -> tu
         return default
     value = table[key]
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise devenvError(f"{where}{key}: expected a list of strings")
+        raise DevenvError(f"{where}{key}: expected a list of strings")
     return tuple(value)
 
 
@@ -128,19 +128,19 @@ def _paths(table: Table, key: str, default: Paths, where: str) -> Paths:
 def _validate(cfg: Config) -> Config:
     """Check rules that span several fields; return ``cfg`` unchanged."""
     if not cfg.command or not cfg.bwrap_path:
-        raise devenvError("command and bwrap_path must not be empty")
+        raise DevenvError("command and bwrap_path must not be empty")
     for name in cfg.env_allow:
         if not name or "=" in name or "\x00" in name:
-            raise devenvError(f"env_allow: invalid variable name {name!r}")
+            raise DevenvError(f"env_allow: invalid variable name {name!r}")
     home = cfg.home
     mounted = [*home.ro, *home.rw, *home.ephemeral]
     if dupes := {p for p in mounted if mounted.count(p) > 1}:
-        raise devenvError(f"[home]: listed more than once: {sorted(dupes)}")
+        raise DevenvError(f"[home]: listed more than once: {sorted(dupes)}")
     for rw in home.rw:
         for path in mounted:
             if path != rw and PurePosixPath(path).is_relative_to(rw):
                 # devenv would follow symlinks the agent can plant inside rw.
-                raise devenvError(
+                raise DevenvError(
                     f"[home]: {path!r} is inside writable {rw!r}; "
                     "use home.protect to keep part of it read-only"
                 )
@@ -152,7 +152,7 @@ def parse(text: str, base: Config) -> Config:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise devenvError(f"invalid TOML: {e}") from e
+        raise DevenvError(f"invalid TOML: {e}") from e
     home_t, project_t = _table(data, "home"), _table(data, "project")
     _check_keys(data, Config, "")
     _check_keys(home_t, HomeConfig, "home.")
@@ -194,11 +194,11 @@ def load(path: Path, *, explicit: bool) -> Config:
         text = path.read_text("utf-8")
     except FileNotFoundError:
         if explicit:
-            raise devenvError(f"{path}: file not found") from None
+            raise DevenvError(f"{path}: file not found") from None
         return defaults()
     except OSError as e:
-        raise devenvError(f"{path}: {e.strerror}") from e
+        raise DevenvError(f"{path}: {e.strerror}") from e
     try:
         return parse(text, defaults())
-    except devenvError as e:
-        raise devenvError(f"{path}: {e}") from e
+    except DevenvError as e:
+        raise DevenvError(f"{path}: {e}") from e

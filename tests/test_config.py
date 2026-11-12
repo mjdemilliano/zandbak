@@ -1,6 +1,6 @@
 import pytest
 
-from devenv import devenvError, config
+from devenv import DevenvError, config
 from devenv.config import Config
 
 
@@ -40,13 +40,13 @@ def test_override_replaces_lists_only_where_set():
     ],
 )
 def test_invalid_config_rejected(text):
-    with pytest.raises(devenvError):
+    with pytest.raises(DevenvError):
         config.parse(text, config.defaults())
 
 
 @pytest.mark.parametrize("path", ["/etc", "../x", ".claude/../../x", "", ".", "./", "a\x00b"])
 def test_bad_paths_rejected(path):
-    with pytest.raises(devenvError):
+    with pytest.raises(DevenvError):
         config.normalise(path, "t")
 
 
@@ -68,25 +68,25 @@ def test_paths_normalised(path, norm):
     ],
 )
 def test_structural_rules(text, match):
-    with pytest.raises(devenvError, match=match):
+    with pytest.raises(DevenvError, match=match):
         config.parse(text, config.defaults())
 
 
 def test_invalid_toml():
-    with pytest.raises(devenvError, match="invalid TOML"):
+    with pytest.raises(DevenvError, match="invalid TOML"):
         config.parse("= =", Config())
 
 
 def test_load_missing_file(tmp_path):
     assert config.load(tmp_path / "nope.toml", explicit=False) == config.defaults()
-    with pytest.raises(devenvError, match="not found"):
+    with pytest.raises(DevenvError, match="not found"):
         config.load(tmp_path / "nope.toml", explicit=True)
 
 
 def test_load_error_is_fatal_not_fallback(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text("network = maybe")
-    with pytest.raises(devenvError, match=str(p)):
+    with pytest.raises(DevenvError, match=str(p)):
         config.load(p, explicit=False)
 
 

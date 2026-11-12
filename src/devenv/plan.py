@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
-from devenv import APP, devenvError, protect, seccomp
+from devenv import APP, DevenvError, protect, seccomp
 from devenv.config import Config, HomeConfig
 
 RC_PATH = f"/tmp/{APP}-rc.sh"  # noqa: S108 - inside the sandbox's private /tmp
@@ -172,12 +172,12 @@ def _in_dot_dir(path: Path, home: Path) -> str | None:
 def check_project(project: Path, home: Path) -> None:
     """Refuse project directories that would expose home or its dot-directories."""
     if home.is_relative_to(project):
-        raise devenvError(
+        raise DevenvError(
             f"refusing to use {project} as the project directory: it contains your home "
             "directory, which would become writable. Run devenv inside a project folder."
         )
     if top := _in_dot_dir(project, home):
-        raise devenvError(
+        raise DevenvError(
             f"refusing to use {project} as the project directory: it is inside ~/{top}, "
             "and dot-directories are governed by the [home] allowlist."
         )
@@ -192,20 +192,20 @@ def resolve_ro_dir(given: str, project: Path, home: Path) -> Path:
     try:
         real = lexical.resolve(strict=True)
     except OSError as e:
-        raise devenvError(f"--ro-dir {given}: {e.strerror}") from None
+        raise DevenvError(f"--ro-dir {given}: {e.strerror}") from None
     if home.is_relative_to(real):
-        raise devenvError(f"--ro-dir {given}: {real} contains your home directory")
+        raise DevenvError(f"--ro-dir {given}: {real} contains your home directory")
     if top := _in_dot_dir(real, home):
-        raise devenvError(f"--ro-dir {given}: {real} is inside ~/{top}; use [home] instead")
+        raise DevenvError(f"--ro-dir {given}: {real} is inside ~/{top}; use [home] instead")
     if lexical.is_relative_to(project) and not real.is_relative_to(project):
         # Inside the agent-writable project but leading out of it: probably a
         # symlink the agent planted in an earlier session.
-        raise devenvError(
+        raise DevenvError(
             f"--ro-dir {given}: lies inside the project but resolves to {real} "
             "via a symlink; pass the real path if you mean it"
         )
     if real.is_relative_to(project):
-        raise devenvError(f"--ro-dir {given}: already visible as part of the project")
+        raise DevenvError(f"--ro-dir {given}: already visible as part of the project")
     return real
 
 
@@ -275,7 +275,7 @@ def _mount_home(plan: Plan, cfg: HomeConfig, home: Path) -> dict[str, Access]:
             continue
         real = host.resolve()
         if home.is_relative_to(real):
-            raise devenvError(f"~/{rel} resolves to {real}, which would expose your whole home")
+            raise DevenvError(f"~/{rel} resolves to {real}, which would expose your whole home")
         plan.warnings += _home_warnings(rel, access)
         match access:
             case Access.RO:
@@ -284,7 +284,7 @@ def _mount_home(plan: Plan, cfg: HomeConfig, home: Path) -> dict[str, Access]:
                 plan.argv += ["--bind", str(real), str(host)]
             case Access.EPHEMERAL:
                 if not real.is_file():
-                    raise devenvError(f"home.ephemeral entry ~/{rel} must be a regular file")
+                    raise DevenvError(f"home.ephemeral entry ~/{rel} must be a regular file")
                 plan.argv += ["--file", plan.fd(real), str(host)]
         mounted[rel] = access
     return mounted
@@ -316,7 +316,7 @@ def _check_self(self_paths: tuple[Path, ...], writable: list[Path]) -> None:
         real = path.resolve()
         for area in writable:
             if real.is_relative_to(area):
-                raise devenvError(
+                raise DevenvError(
                     f"{path} would be writable inside the sandbox (via {area}); the agent "
                     "could disable devenv's protections. Keep devenv, its config, "
                     "Python and bwrap outside writable paths."

@@ -11,8 +11,12 @@ license = "MIT"
 requires-python = ">=3.13"
 dependencies = []
 
-[project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.15", "mypy>=1.15"]
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "ruff>=0.15",
+  "mypy>=1.15"
+]
 
 [project.scripts]
 devenv = "devenv.cli:main"
