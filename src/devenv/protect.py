@@ -1,119 +1,126 @@
-"""Protected paths: read-only mounts plus a post-session check.
+"""Protected paths: read-only mounts plus a check after the session.
 
-A protected path is something inside a writable area (the project, or a
-writable home directory) whose contents the *host* later executes without
-the user choosing to: git hooks and config, agent hooks/settings, .envrc...
+A protected path lies inside a writable area (the project, or a writable home
+directory) and holds something the *host* later runs without the user asking:
+git hooks and config, agent hooks and MCP servers, ``.envrc``...
 
-For each protected path we walk its components from the writable base:
+:func:`analyse` walks the path's components from the writable base:
 
-* existing directories on the way are bind-mounted onto themselves, which
-  makes them mount points. Mount points can't be renamed or removed, so the
-  agent can't swap a parent for a directory (or symlink) it controls;
-* an existing final component, or an existing non-directory on the way
-  (e.g. a worktree's `.git` file), is bind-mounted read-only;
-* a symlink anywhere is *not* followed (following an agent-planted link
-  would mount an arbitrary host file into the sandbox). It is watched;
+* existing directories on the way are bind-mounted onto themselves ("pinned").
+  Mount points cannot be renamed or removed, so the agent cannot swap a parent
+  for one it controls;
+* the final component, or a non-directory on the way (a worktree's ``.git``
+  file), is mounted read-only;
+* a symlink is never followed: following an agent-planted link would mount an
+  arbitrary host file into the sandbox. It is watched instead;
 * a missing component is watched.
 
-After the sandbox exits (and every process in it is dead, thanks to the PID
-namespace), watched components that appeared or changed are renamed to
-`<name>.devenv-quarantine-<timestamp>` so the host never loads them.
+After the sandbox exits (the PID namespace guarantees every process in it is
+dead), :func:`quarantine` renames watched components that appeared or changed
+to ``<name>.devenv-quarantine-<time>``, so the host never loads them.
 """
 
-from __future__ import annotations
-
-import os
 import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
+
+from devenv import APP
+
+type Bind = tuple[Path, Path]
+"""A bind mount: (host source, sandbox destination)."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Identity:
-    exists: bool
-    dev: int = 0
-    ino: int = 0
-    fmt: int = 0
-    link: str | None = None
+    """What a path is, compared before and after the session to detect changes."""
+
+    dev: int
+    """Device number."""
+    ino: int
+    """Inode number."""
+    fmt: int
+    """File type bits (``stat.S_IFMT``)."""
+    link: str | None
+    """Symlink target, or None for other file types."""
 
     @classmethod
-    def of(cls, path: Path) -> "Identity":
+    def of(cls, path: Path) -> Self | None:
+        """Return ``path``'s identity without following symlinks, or None if absent."""
         try:
-            st = os.lstat(path)
-        except FileNotFoundError:
-            return cls(exists=False)
-        except NotADirectoryError:
-            return cls(exists=False)
-        link = os.readlink(path) if stat.S_ISLNK(st.st_mode) else None
-        return cls(True, st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), link)
+            st = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        link = str(path.readlink()) if stat.S_ISLNK(st.st_mode) else None
+        return cls(st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), link)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Protection:
-    """Result of analysing one protected path."""
+    """How one protected path is enforced."""
 
     rel: str
-    ro_mounts: tuple[tuple[Path, Path], ...] = ()  # --ro-bind src dest
-    self_binds: tuple[tuple[Path, Path], ...] = ()  # --bind src dest (pin parents)
-    watch: Path | None = None  # component to check after the session
-    watch_before: Identity | None = None
+    """The configured path, relative to its base."""
+    ro: tuple[Bind, ...] = ()
+    """Read-only mounts (at most one)."""
+    pins: tuple[Bind, ...] = ()
+    """Parent directories bound onto themselves so they cannot be replaced."""
+    watch: Path | None = None
+    """Host path to compare after the session, if it could not be mounted."""
+    before: Identity | None = None
+    """Identity of :attr:`watch` at startup (None: it did not exist)."""
 
 
-def analyse(base: Path, rel: str, dest_base: Path | None = None) -> Protection:
-    """Analyse `rel` under host directory `base`, which appears in the
-    sandbox at `dest_base` (default: the same path)."""
-    dest_base = base if dest_base is None else dest_base
+def analyse(base: Path, rel: str, dest: Path | None = None) -> Protection:
+    """Decide how to protect ``rel`` under host directory ``base``.
+
+    ``base`` appears in the sandbox at ``dest`` (default: the same path).
+    """
+    dest = dest or base
+    pins: list[Bind] = []
     parts = rel.split("/")
-    cur = base
-    pins: list[tuple[Path, Path]] = []
-    for i, name in enumerate(parts):
-        cur = cur / name
-        ident = Identity.of(cur)
-        last = i == len(parts) - 1
-        if not ident.exists or ident.fmt == stat.S_IFLNK:
-            return Protection(rel, (), tuple(pins), cur, ident)
-        if last or ident.fmt != stat.S_IFDIR:
-            # Final component, or a non-directory that the rest of the
-            # path can't live under: freeze it.
-            return Protection(rel, ((cur, dest_base / "/".join(parts[: i + 1])),), tuple(pins))
-        pins.append((cur, dest_base / "/".join(parts[: i + 1])))
-    raise AssertionError("unreachable")
+    for depth in range(1, len(parts) + 1):
+        sub = "/".join(parts[:depth])
+        host, inside = base / sub, dest / sub
+        ident = Identity.of(host)
+        if ident is None or ident.link is not None:
+            return Protection(rel=rel, pins=tuple(pins), watch=host, before=ident)
+        if depth == len(parts) or ident.fmt != stat.S_IFDIR:
+            return Protection(rel=rel, ro=((host, inside),), pins=tuple(pins))
+        pins.append((host, inside))
+    raise AssertionError("unreachable: rel has at least one component")
 
 
-def _quarantine_name(path: Path, stamp: str) -> Path:
-    cand = path.with_name(f"{path.name}.devenv-quarantine-{stamp}")
+def _free_name(path: Path, stamp: str) -> Path:
+    """Return an unused quarantine name next to ``path``."""
+    candidate = path.with_name(f"{path.name}.{APP}-quarantine-{stamp}")
     n = 1
-    while os.path.lexists(cand):
+    while candidate.exists(follow_symlinks=False):
         n += 1
-        cand = path.with_name(f"{path.name}.devenv-quarantine-{stamp}-{n}")
-    return cand
+        candidate = path.with_name(f"{path.name}.{APP}-quarantine-{stamp}-{n}")
+    return candidate
 
 
-def check_after(protections: list[Protection], *, now: float | None = None) -> list[str]:
-    """Quarantine watched paths that changed. Returns human-readable notes."""
+def quarantine(protections: list[Protection], now: float | None = None) -> list[str]:
+    """Rename watched paths that appeared or changed; return messages for the user."""
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     notes = []
-    seen: set[Path] = set()
-    for p in protections:
-        if p.watch is None or p.watch in seen:
+    for watch, before in {p.watch: p.before for p in protections if p.watch}.items():
+        after = Identity.of(watch)
+        if after is None or after == before:
             continue
-        seen.add(p.watch)
-        after = Identity.of(p.watch)
-        if after == p.watch_before or not after.exists:
-            continue
-        dest = _quarantine_name(p.watch, stamp)
+        target = _free_name(watch, stamp)
         try:
-            os.rename(p.watch, dest)  # renames a symlink itself, never its target
+            watch.rename(target)  # renames a symlink itself, never its target
         except OSError as e:
             notes.append(
-                f"DANGER: {p.watch} was created or changed in the sandbox and "
-                f"could not be quarantined ({e}). Inspect it before running "
-                "anything in that directory."
+                f"DANGER: {watch} was created or changed in the sandbox and could not be "
+                f"quarantined ({e.strerror}). Inspect it before running anything there."
             )
-            continue
-        notes.append(
-            f"quarantined {p.watch} -> {dest.name} (created or changed by the "
-            f"sandbox; protected path {p.rel!r}). Review it before restoring."
-        )
+        else:
+            notes.append(
+                f"quarantined {watch} -> {target.name}: created or changed in the sandbox. "
+                "Review it before restoring."
+            )
     return notes

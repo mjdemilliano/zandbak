@@ -1,5 +1,7 @@
+"""Allow ``python -m devenv``."""
+
 import sys
 
-from .cli import main
+from devenv.cli import main
 
 sys.exit(main())

@@ -1,350 +1,401 @@
-"""Turn a Config plus the current situation into a bwrap command line.
+"""Turn a :class:`Request` into a bwrap command line (a :class:`Plan`).
 
-Everything here is pure (it only reads the filesystem), so it can be tested
-without running bwrap.
+This module only reads the filesystem; it never changes it or starts
+processes, so it can be tested without bwrap. Mount order matters: later
+bwrap mounts cover earlier ones. :func:`build` therefore goes from broad to
+specific and ends with the protections, so nothing can cover them.
 """
 
-from __future__ import annotations
-
 import os
-import stat
+import platform
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
 
-from . import protect, seccomp
-from .config import Config
+from devenv import APP, devenvError, protect, seccomp
+from devenv.config import Config, HomeConfig
+
+RC_PATH = f"/tmp/{APP}-rc.sh"  # noqa: S108 - inside the sandbox's private /tmp
+"""Where the bash prompt script is written inside the sandbox."""
+
+BASH_RC = "PS1='[\\[\\e[36m\\]🫧\\[\\e[0m\\]] \\w > '\n".encode()
+"""Bash startup script giving the sandbox shell a recognisable prompt."""
+
+PRIVATE_DIRS = ("/dev/shm", "/tmp", "/var/tmp", "/run")  # noqa: S108 - fresh, private tmpfs
+"""Mounted as empty tmpfs (after ``/dev``), hiding the host's shared memory and sockets."""
+
+HOST_EXEC = frozenset(
+    {
+        ".bashrc",
+        ".bash_profile",
+        ".bash_login",
+        ".profile",
+        ".zshrc",
+        ".zprofile",
+        ".zshenv",
+        ".config/fish",
+        ".config/autostart",
+        ".config/systemd",
+        ".config/environment.d",
+        ".local/bin",
+        ".local/share/applications",
+        ".cargo",
+        ".gitconfig",
+        ".config/git",
+        ".npmrc",
+        ".pam_environment",
+        ".xprofile",
+        ".xinitrc",
+        ".ssh",
+        ".gnupg",
+    }
+)
+"""Home paths whose writers can make the host run code; writable mounts warn."""
+
+SECRETS = frozenset(
+    {
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".netrc",
+        ".git-credentials",
+        ".config/gh",
+        ".password-store",
+        ".Xauthority",
+        ".pki",
+        ".local/share/keyrings",
+        ".mozilla",
+        ".config/google-chrome",
+        ".config/chromium",
+        ".vault-token",
+        ".pypirc",
+    }
+)
+"""Home paths that usually hold credentials; any mount warns."""
 
 
-class PlanError(Exception):
-    pass
+class Access(StrEnum):
+    """How a ``[home]`` entry is exposed."""
+
+    RO = "ro"
+    """Read-only bind mount."""
+    RW = "rw"
+    """Read-write bind mount."""
+    EPHEMERAL = "ephemeral"
+    """Private copy, discarded at exit."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FdRef:
-    """Placeholder for a file descriptor opened at launch time."""
+    """Placeholder in :attr:`Plan.argv` for a file descriptor opened at launch."""
 
     index: int
+    """Position in :attr:`Plan.fds`."""
 
 
-@dataclass(frozen=True)
-class FdSource:
-    data: bytes | None = None  # in-memory content (memfd)
-    path: Path | None = None  # host file to open read-only
+type FdSource = bytes | Path
+"""Content for a descriptor: bytes (served from a memfd) or a host file (opened read-only)."""
+
+type Arg = str | FdRef
+"""One bwrap argument."""
 
 
-@dataclass
-class Plan:
-    argv: list = field(default_factory=list)  # str | FdRef
-    fds: list[FdSource] = field(default_factory=list)
-    protections: list[protect.Protection] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Request:
+    """Everything :func:`build` needs, gathered by the CLI."""
+
+    config: Config
+    """The validated policy."""
+    home: Path
+    """The user's home directory."""
+    cwd: Path
+    """Where devenv was started; becomes the project directory."""
+    environ: Mapping[str, str]
+    """The host environment, filtered through ``env_allow``."""
+    command: tuple[str, ...]
+    """Program and arguments to run in the sandbox."""
+    ro_dirs: tuple[str, ...] = ()
+    """``--ro-dir`` arguments as given (relative to ``cwd``)."""
+    network: bool = True
+    """Share the host network."""
+    allow_git_writes: bool = False
+    """Skip the project's ``.git`` protections."""
     landlock: bool = False
+    """Landlock scoping is usable (see :func:`devenv.landlock.usable`)."""
+    machine: str = field(default_factory=platform.machine)
+    """CPU architecture, for the seccomp filter."""
+    self_paths: tuple[Path, ...] = ()
+    """devenv's code, config, Python and bwrap: these must stay out of the agent's reach."""
+    interactive: bool = True
+    """stdin is a terminal, so run the command under an interactive shell."""
 
-    def fd(self, src: FdSource) -> FdRef:
-        self.fds.append(src)
+
+@dataclass(slots=True)
+class Plan:
+    """The result: bwrap arguments plus what the launcher must prepare and check."""
+
+    argv: list[Arg] = field(default_factory=list)
+    """bwrap arguments, excluding the bwrap path."""
+    fds: list[FdSource] = field(default_factory=list)
+    """Descriptors to open and pass; referenced from :attr:`argv` by :class:`FdRef`."""
+    protections: list[protect.Protection] = field(default_factory=list)
+    """Protected paths, for the post-session :func:`devenv.protect.quarantine`."""
+    warnings: list[str] = field(default_factory=list)
+    """Messages to show before starting."""
+    landlock: bool = False
+    """Apply Landlock scoping when launching."""
+
+    def fd(self, source: FdSource) -> FdRef:
+        """Register ``source`` to be opened at launch; return its placeholder."""
+        self.fds.append(source)
         return FdRef(len(self.fds) - 1)
 
 
-RC_PATH = "/tmp/devenv-rc.sh"
-BASH_RC = b"PS1='[\\[\\e[36m\\]\xf0\x9f\xab\xa7\\[\\e[0m\\]] \\w > '\n"
-
-# Paths that let whoever can write them run code on the host or that hold
-# credentials. Mounting them gets a warning (they are allowed: the user is
-# in charge of the allowlist).
-HOST_EXEC = (
-    ".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc",
-    ".zprofile", ".zshenv", ".config/fish", ".config/autostart",
-    ".config/systemd", ".config/environment.d", ".local/bin", ".cargo",
-    ".gitconfig", ".config/git", ".npmrc", ".pam_environment", ".xprofile",
-    ".xinitrc", ".ssh", ".gnupg", ".local/share/applications",
-)
-SECRETS = (
-    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".netrc",
-    ".git-credentials", ".config/gh", ".password-store", ".Xauthority",
-    ".pki", ".local/share/keyrings", ".mozilla", ".config/google-chrome",
-    ".config/chromium", ".vault-token", ".pypirc",
-)
-
-
 def _overlaps(a: str, b: str) -> bool:
-    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+    """Return whether relative path ``a`` equals, contains or is inside ``b``."""
+    pa, pb = PurePosixPath(a), PurePosixPath(b)
+    return pa.is_relative_to(pb) or pb.is_relative_to(pa)
 
 
-def _is_within(child: Path, parent: Path) -> bool:
-    return child == parent or parent in child.parents
+def _in_dot_dir(path: Path, home: Path) -> str | None:
+    """Return the ``~/.name`` directory containing ``path``, if any."""
+    if path.is_relative_to(home) and path != home:
+        top = path.relative_to(home).parts[0]
+        return top if top.startswith(".") else None
+    return None
 
 
 def check_project(project: Path, home: Path) -> None:
-    if project == Path("/"):
-        raise PlanError("refusing to use / as the project directory")
-    if _is_within(home, project):
-        raise PlanError(
-            f"refusing to use {project} as the project directory: it contains "
-            "your home directory, which would expose everything in it read-write. "
-            "Run devenv from inside a project folder."
+    """Refuse project directories that would expose home or its dot-directories."""
+    if home.is_relative_to(project):
+        raise devenvError(
+            f"refusing to use {project} as the project directory: it contains your home "
+            "directory, which would become writable. Run devenv inside a project folder."
         )
-    if _is_within(project, home):
-        top = project.relative_to(home).parts[0]
-        if top.startswith("."):
-            raise PlanError(
-                f"refusing to use {project} as the project directory: it is "
-                f"inside ~/{top}, and dot-directories are controlled by the "
-                "[home] allowlist."
-            )
+    if top := _in_dot_dir(project, home):
+        raise devenvError(
+            f"refusing to use {project} as the project directory: it is inside ~/{top}, "
+            "and dot-directories are governed by the [home] allowlist."
+        )
 
 
-def resolve_ro_dir(given: str, cwd: Path, project: Path, home: Path) -> Path:
-    lexical = Path(os.path.normpath(cwd / given))
+def resolve_ro_dir(given: str, project: Path, home: Path) -> Path:
+    """Resolve a ``--ro-dir`` argument, refusing paths that would weaken the sandbox.
+
+    Relative paths are taken from the (resolved) project directory.
+    """
+    lexical = Path(os.path.normpath(project / given))  # collapse "..", don't follow links
     try:
-        real = Path(os.path.realpath(lexical, strict=True))
+        real = lexical.resolve(strict=True)
     except OSError as e:
-        raise PlanError(f"--ro-dir {given}: {e.strerror or e}") from None
-    if real == Path("/") or _is_within(home, real):
-        raise PlanError(f"--ro-dir {given}: {real} contains your home directory")
-    if _is_within(real, home):
-        top = real.relative_to(home).parts[0]
-        if top.startswith("."):
-            raise PlanError(
-                f"--ro-dir {given}: {real} is inside ~/{top}; use the [home] "
-                "allowlist for dot-directories"
-            )
-    if _is_within(lexical, project) and not _is_within(real, project):
-        # A path inside the (agent-writable) project that leads outside it is
-        # probably a symlink the agent planted in an earlier session.
-        raise PlanError(
+        raise devenvError(f"--ro-dir {given}: {e.strerror}") from None
+    if home.is_relative_to(real):
+        raise devenvError(f"--ro-dir {given}: {real} contains your home directory")
+    if top := _in_dot_dir(real, home):
+        raise devenvError(f"--ro-dir {given}: {real} is inside ~/{top}; use [home] instead")
+    if lexical.is_relative_to(project) and not real.is_relative_to(project):
+        # Inside the agent-writable project but leading out of it: probably a
+        # symlink the agent planted in an earlier session.
+        raise devenvError(
             f"--ro-dir {given}: lies inside the project but resolves to {real} "
-            "outside it (via a symlink); pass the real path if you mean it"
+            "via a symlink; pass the real path if you mean it"
         )
-    if _is_within(real, project):
-        raise PlanError(f"--ro-dir {given}: already visible as part of the project")
+    if real.is_relative_to(project):
+        raise devenvError(f"--ro-dir {given}: already visible as part of the project")
     return real
 
 
-def _system_mounts() -> list[str]:
-    args: list[str] = []
-    for p in ("/usr", "/etc"):
-        args += ["--ro-bind", p, p]
-    for p in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
-        if os.path.islink(p):
-            args += ["--symlink", os.readlink(p), p]
-        elif os.path.isdir(p):
-            args += ["--ro-bind", p, p]
-    for p in ("/opt", "/sys"):
-        args += ["--ro-bind-try", p, p]
-    args += [
-        "--dev", "/dev",
-        "--tmpfs", "/dev/shm",  # private: not the host's shared memory
-        "--proc", "/proc",
-        "--tmpfs", "/tmp",
-        "--tmpfs", "/var/tmp",
-        "--tmpfs", "/run",
+def _namespace_args(*, network: bool) -> list[Arg]:
+    """Namespaces and privileges: new everything, no capabilities."""
+    return [
+        "--unshare-all",
+        *(["--share-net"] if network else []),
+        "--die-with-parent",
+        "--cap-drop",
+        "ALL",
     ]
-    # DNS: /etc/resolv.conf often points into /run, which we just hid.
-    resolv = Path(os.path.realpath("/etc/resolv.conf"))
-    if resolv.parts[:2] == ("/", "run") and resolv.is_file():
+
+
+def _env_args(allow: tuple[str, ...], environ: Mapping[str, str], home: Path) -> list[Arg]:
+    """Start from an empty environment and copy only allowlisted variables."""
+    args: list[Arg] = ["--clearenv"]
+    for key in allow:
+        if key != "HOME" and key in environ:
+            args += ["--setenv", key, environ[key]]
+    return [*args, "--setenv", "HOME", str(home), "--setenv", f"{APP.upper()}_SANDBOX", "1"]
+
+
+def _system_args() -> list[Arg]:
+    """Read-only OS, private scratch filesystems, and DNS configuration."""
+    args: list[Arg] = ["--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc"]
+    for name in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
+        path = Path(name)
+        if path.is_symlink():
+            args += ["--symlink", str(path.readlink()), name]
+        elif path.is_dir():
+            args += ["--ro-bind", name, name]
+    args += ["--ro-bind-try", "/opt", "/opt", "--ro-bind-try", "/sys", "/sys"]
+    args += ["--dev", "/dev", "--proc", "/proc"]
+    for scratch in PRIVATE_DIRS:
+        args += ["--tmpfs", scratch]
+    # /etc/resolv.conf often points into /run, which was just hidden.
+    resolv = Path("/etc/resolv.conf").resolve()
+    if resolv.is_relative_to("/run") and resolv.is_file():
         args += ["--ro-bind", str(resolv), str(resolv)]
-    if os.path.isdir("/run/systemd/resolve"):
+    if Path("/run/systemd/resolve").is_dir():
         args += ["--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve"]
     return args
 
 
-def _home_entries(cfg: Config) -> list[tuple[str, str]]:
-    """(mode, rel) sorted so parents are mounted before children."""
-    entries = (
-        [("ro", r) for r in cfg.home_ro]
-        + [("rw", r) for r in cfg.home_rw]
-        + [("ephemeral", r) for r in cfg.home_ephemeral]
-    )
-    for mode, rel in entries:
-        if mode == "rw":
+def _home_warnings(rel: str, access: Access) -> list[str]:
+    """Warnings for mounting ``~/rel`` with ``access``."""
+    notes = []
+    if access is Access.RW and any(_overlaps(rel, p) for p in HOST_EXEC):
+        notes.append(f"~/{rel} is writable: the agent can plant code your host runs later")
+    if any(_overlaps(rel, p) for p in SECRETS):
+        notes.append(f"~/{rel} may contain credentials and is visible to the agent")
+    return notes
+
+
+def _mount_home(plan: Plan, cfg: HomeConfig, home: Path) -> dict[str, Access]:
+    """Mount an empty home plus the allowlist; return what was mounted, by path."""
+    entries = [(rel, Access.RO) for rel in cfg.ro]
+    entries += [(rel, Access.RW) for rel in cfg.rw]
+    entries += [(rel, Access.EPHEMERAL) for rel in cfg.ephemeral]
+    entries.sort(key=lambda e: e[0].count("/"))  # parents before children
+    plan.argv += ["--tmpfs", str(home)]
+    mounted: dict[str, Access] = {}
+    for rel, access in entries:
+        host = home / rel
+        if not host.exists(follow_symlinks=False):
             continue
-        for rw in cfg.home_rw:
-            if rel.startswith(rw + "/"):
-                # devenv would follow host symlinks the agent can plant there.
-                raise PlanError(
-                    f"home.{mode} entry {rel!r} is inside writable {rw!r}; "
-                    "use home.protect to make part of it read-only"
-                )
-    for rel in cfg.home_rw:
-        for other in cfg.home_rw:
-            if rel != other and rel.startswith(other + "/"):
-                raise PlanError(f"home.rw entry {rel!r} is already inside {other!r}")
-    return sorted(entries, key=lambda e: e[1].count("/"))
+        real = host.resolve()
+        if home.is_relative_to(real):
+            raise devenvError(f"~/{rel} resolves to {real}, which would expose your whole home")
+        plan.warnings += _home_warnings(rel, access)
+        match access:
+            case Access.RO:
+                plan.argv += ["--ro-bind", str(real), str(host)]
+            case Access.RW:
+                plan.argv += ["--bind", str(real), str(host)]
+            case Access.EPHEMERAL:
+                if not real.is_file():
+                    raise devenvError(f"home.ephemeral entry ~/{rel} must be a regular file")
+                plan.argv += ["--file", plan.fd(real), str(host)]
+        mounted[rel] = access
+    return mounted
 
 
-def _warn_home(mode: str, rel: str, warnings: list[str]) -> None:
-    if mode == "rw" and any(_overlaps(rel, h) for h in HOST_EXEC):
-        warnings.append(
-            f"~/{rel} is writable: the agent can plant code your host runs later"
-        )
-    if any(_overlaps(rel, s) for s in SECRETS):
-        warnings.append(f"~/{rel} may contain credentials and is visible to the agent")
+def _mount_project(plan: Plan, req: Request, project: Path, home: Path) -> None:
+    """Mount the project read-write and the ``--ro-dir`` folders read-only.
+
+    ``--ro-dir`` folders containing the project go first, so the project's
+    read-write mount lands on top of them.
+    """
+    ro_dirs = [resolve_ro_dir(d, project, home) for d in req.ro_dirs]
+    outer = sorted((d for d in ro_dirs if project.is_relative_to(d)), key=lambda d: len(d.parts))
+    for d in outer:
+        plan.argv += ["--ro-bind", str(d), str(d)]
+    plan.argv += ["--bind", str(project), str(project)]
+    for d in ro_dirs:
+        if d not in outer:
+            plan.argv += ["--ro-bind", str(d), str(d)]
 
 
-def _covering_mode(rel: str, mounted: dict[str, str]) -> tuple[str, str] | None:
-    best = None
-    for m_rel, mode in mounted.items():
-        if rel == m_rel or rel.startswith(m_rel + "/"):
-            if best is None or len(m_rel) > len(best[0]):
-                best = (m_rel, mode)
-    return best
+def _check_self(self_paths: tuple[Path, ...], writable: list[Path]) -> None:
+    """Refuse to run if the agent could modify devenv itself.
 
-
-def build(
-    cfg: Config,
-    *,
-    home: str,
-    cwd: str,
-    environ: dict[str, str],
-    command: list[str],
-    ro_dirs: list[str] = (),
-    network: bool | None = None,
-    allow_git_writes: bool = False,
-    landlock_ok: bool = False,
-    machine: str | None = None,
-    self_paths: list[str] = (),
-    interactive: bool = True,
-) -> Plan:
-    plan = Plan()
-    home_p = Path(os.path.realpath(home))
-    cwd_p = Path(os.path.realpath(cwd))
-    project = cwd_p
-    check_project(project, home_p)
-    if network is None:
-        network = cfg.network
-
-    a = plan.argv
-    a += ["--unshare-all"]
-    if network:
-        a += ["--share-net"]
-    a += ["--die-with-parent", "--cap-drop", "ALL"]
-
-    # Environment: start empty, copy the allowlist.
-    a += ["--clearenv"]
-    for key in cfg.env_allow:
-        if key == "HOME":
-            continue
-        if key in environ:
-            a += ["--setenv", key, environ[key]]
-    a += ["--setenv", "HOME", str(home_p), "--setenv", "devenv_SANDBOX", "1"]
-
-    a += _system_mounts()
-
-    # Home: empty tmpfs plus allowlisted entries.
-    a += ["--tmpfs", str(home_p)]
-    mounted: dict[str, str] = {}
-    for mode, rel in _home_entries(cfg):
-        host = home_p / rel
-        if not os.path.lexists(host):
-            continue
-        real = Path(os.path.realpath(host))
-        if real == Path("/") or _is_within(home_p, real):
-            raise PlanError(
-                f"home.{mode} entry ~/{rel} resolves to {real}, which would "
-                "expose your whole home directory"
-            )
-        _warn_home(mode, rel, plan.warnings)
-        dest = str(home_p / rel)
-        if mode == "ro":
-            a += ["--ro-bind", str(real), dest]
-        elif mode == "rw":
-            a += ["--bind", str(real), dest]
-        else:
-            if not real.is_file():
-                raise PlanError(f"home.ephemeral entry ~/{rel} must be a regular file")
-            a += ["--file", plan.fd(FdSource(path=real)), dest]
-        mounted[rel] = mode
-
-    # Extra read-only directories. Those containing the project go first so
-    # the project's read-write mount lands on top of them.
-    ro_real = [resolve_ro_dir(d, cwd_p, project, home_p) for d in ro_dirs]
-    outer = [d for d in ro_real if _is_within(project, d)]
-    others = [d for d in ro_real if d not in outer]
-    for d in sorted(outer, key=lambda p: len(p.parts)):
-        a += ["--ro-bind", str(d), str(d)]
-    a += ["--bind", str(project), str(project)]
-    for d in others:
-        a += ["--ro-bind", str(d), str(d)]
-
-    # The agent must not be able to change devenv itself (its config, code,
-    # interpreter or bwrap), or the next run would be unprotected. A config
-    # file that doesn't exist yet counts too: the agent could create it.
-    writable = [project] + [
-        Path(os.path.realpath(home_p / rel)) for rel, m in mounted.items() if m == "rw"
-    ]
-    for sp in self_paths:
-        real = Path(os.path.realpath(sp))
-        for w in writable:
-            if _is_within(real, w):
-                raise PlanError(
-                    f"{sp} would be writable inside the sandbox (via {w}); the "
-                    "agent could disable devenv's protections for the next run. "
-                    "Keep devenv, its config, Python and bwrap outside writable paths."
+    Otherwise it could disable the protections for the next run. A config
+    file that doesn't exist yet counts too: the agent could create it.
+    """
+    for path in self_paths:
+        real = path.resolve()
+        for area in writable:
+            if real.is_relative_to(area):
+                raise devenvError(
+                    f"{path} would be writable inside the sandbox (via {area}); the agent "
+                    "could disable devenv's protections. Keep devenv, its config, "
+                    "Python and bwrap outside writable paths."
                 )
 
-    a += list(cfg.bwrap_extra_args)
 
-    # Protections come last so nothing above can cover them.
-    for rel in cfg.home_protect:
-        cover = _covering_mode(rel, mounted)
-        if cover is None or cover[1] != "rw":
-            continue  # not mounted, or already read-only / ephemeral
-        cover_rel = cover[0]
-        rest = rel[len(cover_rel) + 1 :]
-        if not rest:
-            continue  # protecting a whole rw entry: mount it ro instead
-        host_base = Path(os.path.realpath(home_p / cover_rel))
+def _covering(rel: str, mounted: dict[str, Access]) -> str | None:
+    """Return the deepest mounted home entry containing ``rel``, if it is writable."""
+    covers = [m for m in mounted if PurePosixPath(rel).is_relative_to(m)]
+    best = max(covers, key=len, default=None)
+    return best if best is not None and mounted[best] is Access.RW else None
+
+
+def _protect(
+    plan: Plan, req: Request, project: Path, home: Path, mounted: dict[str, Access]
+) -> None:
+    """Analyse and mount protected paths. Must be the last mounts."""
+    for rel in req.config.home.protect:
+        top = _covering(rel, mounted)
+        if top is None or top == rel:
+            continue  # not writable, or a whole entry (make it ro instead)
+        base = home / top
         plan.protections.append(
-            protect.analyse(host_base, rest, dest_base=home_p / cover_rel)
+            protect.analyse(base.resolve(), str(PurePosixPath(rel).relative_to(top)), base)
         )
-    for rel in cfg.project_protect:
-        if allow_git_writes and (rel == ".git" or rel.startswith(".git/")):
-            continue
-        plan.protections.append(protect.analyse(project, rel))
-    pinned: set[Path] = set()
-    for prot in plan.protections:
-        for src, dest in prot.self_binds:
-            if dest not in pinned:
-                pinned.add(dest)
-                a += ["--bind", str(src), str(dest)]
-    for prot in plan.protections:
-        for src, dest in prot.ro_mounts:
-            a += ["--ro-bind", str(src), str(dest)]
+    for rel in req.config.project.protect:
+        if not (req.allow_git_writes and PurePosixPath(rel).is_relative_to(".git")):
+            plan.protections.append(protect.analyse(project, rel))
+    pins = dict.fromkeys(pin for p in plan.protections for pin in p.pins)  # ordered, unique
+    for src, dest in pins:
+        plan.argv += ["--bind", str(src), str(dest)]
+    for src, dest in (ro for p in plan.protections for ro in p.ro):
+        plan.argv += ["--ro-bind", str(src), str(dest)]
 
-    # Terminal injection: seccomp filter, or a new session as a fallback.
+
+def _terminal_args(plan: Plan, machine: str) -> list[Arg]:
+    """Block terminal injection with seccomp, or fall back to a new session."""
     if seccomp.supported(machine):
-        a += ["--seccomp", plan.fd(FdSource(data=seccomp.build_filter(machine)))]
-    else:
-        a += ["--new-session"]
+        return ["--seccomp", plan.fd(seccomp.build_filter(machine))]
+    plan.warnings.append(
+        f"no seccomp filter for {machine}; using --new-session (Ctrl-C ends the sandbox)"
+    )
+    return ["--new-session"]
+
+
+def _command_args(plan: Plan, command: tuple[str, ...], *, interactive: bool) -> list[Arg]:
+    """Arguments that start ``command``, after a ``--`` that ends bwrap's options.
+
+    Commands run under bash (some agents, such as goose, need a parent that
+    stays alive) with arguments passed as positional parameters, so the shell
+    never re-parses them.
+    """
+    if command == ("bash",):
+        return ["--file", plan.fd(BASH_RC), RC_PATH, "--", "bash", "--rcfile", RC_PATH, "-i"]
+    flags = ["-i"] if interactive else []
+    return ["--", "bash", *flags, "-c", '"$@"', APP, *command]
+
+
+def build(req: Request) -> Plan:
+    """Build the bwrap command line for ``req``."""
+    home, project = req.home.resolve(), req.cwd.resolve()
+    check_project(project, home)
+    cfg = req.config
+    plan = Plan(landlock=req.landlock and req.network)
+    plan.argv += _namespace_args(network=req.network)
+    plan.argv += _env_args(cfg.env_allow, req.environ, home)
+    plan.argv += _system_args()
+    mounted = _mount_home(plan, cfg.home, home)
+    _mount_project(plan, req, project, home)
+    writable = [project, *((home / r).resolve() for r, a in mounted.items() if a is Access.RW)]
+    _check_self(req.self_paths, writable)
+    plan.argv += cfg.bwrap_extra_args
+    _protect(plan, req, project, home, mounted)
+    plan.argv += _terminal_args(plan, req.machine)
+    if req.network and not req.landlock:
         plan.warnings.append(
-            "no seccomp filter for this CPU architecture; using --new-session "
-            "(Ctrl-C ends the whole sandbox)"
+            "Landlock ABI 6 (Linux 6.12+) unavailable: the agent can reach host abstract "
+            "sockets such as the X11 display. Use --no-network for untrusted work."
         )
-
-    plan.landlock = landlock_ok and network
-    if network and not landlock_ok:
-        plan.warnings.append(
-            "Landlock ABI 6 (Linux 6.12+) unavailable: the agent can reach "
-            "host abstract sockets such as the X11 display. Use --no-network "
-            "for untrusted work."
-        )
-
-    a += ["--chdir", str(project)]
-
-    if command == ["bash"]:
-        a += ["--file", plan.fd(FdSource(data=BASH_RC)), RC_PATH]
-        argv = ["bash", "--rcfile", RC_PATH, "-i"]
-    else:
-        # Run through an interactive bash (some agents, e.g. goose, need a
-        # parent that stays alive) but pass arguments as positional
-        # parameters so nothing is re-parsed by the shell.
-        argv = ["bash", *(["-i"] if interactive else []), "-c", '"$@"', "devenv", *command]
-    a += ["--", *argv]
+    plan.argv += ["--chdir", str(project)]
+    plan.argv += _command_args(plan, req.command, interactive=req.interactive)
     return plan
-
-
-def is_setuid(path: str) -> bool:
-    try:
-        return bool(os.stat(path).st_mode & stat.S_ISUID)
-    except OSError:
-        return False

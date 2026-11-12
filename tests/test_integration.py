@@ -16,7 +16,9 @@ def _bwrap_works():
     b = shutil.which("bwrap")
     if not b:
         return False
-    r = subprocess.run([b, "--ro-bind", "/", "/", "--unshare-all", "true"], capture_output=True)
+    r = subprocess.run(
+        [b, "--ro-bind", "/", "/", "--unshare-all", "true"], capture_output=True, check=False
+    )
     return r.returncode == 0
 
 
@@ -32,10 +34,21 @@ def run(env, tmp_path):
     xdg = tmp_path / "xdg"
 
     def _run(*args, cwd=proj, stdin=subprocess.DEVNULL):
-        e = {"HOME": str(home), "PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(xdg), "TERM": "dumb"}
+        e = {
+            "HOME": str(home),
+            "PATH": os.environ["PATH"],
+            "XDG_CONFIG_HOME": str(xdg),
+            "TERM": "dumb",
+        }
         return subprocess.run(
-            [sys.executable, "-m", "devenv", *args], cwd=cwd, env=e, stdin=stdin,
-            capture_output=True, text=True, timeout=60,
+            [sys.executable, "-m", "devenv", *args],
+            cwd=cwd,
+            env=e,
+            stdin=stdin,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
         )
 
     return _run
@@ -58,10 +71,15 @@ def test_secrets_hidden_and_home_minimal(run, env):
 
 def test_project_writable_git_protected(run, env):
     _, proj = env
-    r = sh(run, "echo hi > f && echo x >> .git/config; echo c=$?; touch .git/hooks/p; echo h=$?; mv .git .g; echo m=$?")
+    r = sh(
+        run,
+        "echo hi > f && echo x >> .git/config; echo c=$?; "
+        "touch .git/hooks/p; echo h=$?; mv .git .g; echo m=$?",
+    )
     assert (proj / "f").read_text() == "hi\n"
     assert "c=1" in r.stdout or "c=2" in r.stdout
-    assert "h=1" in r.stdout and "m=1" in r.stdout
+    assert "h=1" in r.stdout
+    assert "m=1" in r.stdout
     assert (proj / ".git/config").read_text() == "[core]\n"
     assert not (proj / ".git/hooks/p").exists()
 
@@ -74,17 +92,25 @@ def test_allow_git_writes(run, env):
 
 def test_created_hook_files_quarantined(run, env):
     home, proj = env
-    r = sh(run, f"echo {{}} > .mcp.json; mkdir -p .claude && echo {{}} > .claude/settings.json; "
-                f"echo {{}} > {home}/.claude/settings.json; mkdir {home}/.claude/hooks")
-    assert not (proj / ".mcp.json").exists() and not (proj / ".claude").exists()
-    assert not (home / ".claude/settings.json").exists() and not (home / ".claude/hooks").exists()
+    r = sh(
+        run,
+        f"echo {{}} > .mcp.json; mkdir -p .claude && echo {{}} > .claude/settings.json; "
+        f"echo {{}} > {home}/.claude/settings.json; mkdir {home}/.claude/hooks",
+    )
+    assert not (proj / ".mcp.json").exists()
+    assert not (proj / ".claude").exists()
+    assert not (home / ".claude/settings.json").exists()
+    assert not (home / ".claude/hooks").exists()
     assert r.stderr.count("quarantined") == 4
 
 
 def test_existing_agent_settings_read_only(run, env):
     home, _ = env
     (home / ".claude/settings.json").write_text("{}")
-    sh(run, f"echo '{{\"hooks\":1}}' > {home}/.claude/settings.json; echo ok > {home}/.claude/session")
+    sh(
+        run,
+        f"echo '{{\"hooks\":1}}' > {home}/.claude/settings.json; echo ok > {home}/.claude/session",
+    )
     assert (home / ".claude/settings.json").read_text() == "{}"
     assert (home / ".claude/session").read_text() == "ok\n"  # rest of .claude writable
 
@@ -104,9 +130,11 @@ def test_planted_symlink_not_followed(run, env):
 
 
 def test_tiocsti_blocked(run):
-    code = ("import fcntl,termios\n"
-            "try:\n fcntl.ioctl(0, termios.TIOCSTI, b'x')\n"
-            "except OSError as e: print(e.errno)")
+    code = (
+        "import fcntl,termios\n"
+        "try:\n fcntl.ioctl(0, termios.TIOCSTI, b'x')\n"
+        "except OSError as e: print(e.errno)"
+    )
     r = run("-c", "python3", "--", "-c", code)
     assert r.stdout.strip() == "1"  # EPERM from seccomp, not ENOTTY
 
@@ -118,9 +146,11 @@ def test_args_and_exit_code(run):
 
 
 def test_no_network(run):
-    code = ("import socket\ns=socket.socket()\ns.settimeout(3)\n"
-            "try: s.connect(('1.1.1.1', 53)); print('up')\n"
-            "except OSError as e: print('down')")
+    code = (
+        "import socket\ns=socket.socket()\ns.settimeout(3)\n"
+        "try: s.connect(('1.1.1.1', 53)); print('up')\n"
+        "except OSError as e: print('down')"
+    )
     assert run("--no-network", "-c", "python3", "--", "-c", code).stdout.strip() == "down"
 
 
@@ -130,16 +160,18 @@ def test_refuses_home(run, env):
     assert r.returncode == 2
 
 
-@pytest.mark.skipif(not landlock.available(), reason="Landlock ABI 6 unavailable")
+@pytest.mark.skipif(landlock.abi_version() < landlock.MIN_ABI, reason="Landlock ABI 6 unavailable")
 def test_abstract_socket_blocked(run):
     name = f"devenv-test-{os.getpid()}"
     srv = socket.socket(socket.AF_UNIX)
     srv.bind("\0" + name)
     srv.listen()
-    threading.Thread(target=lambda: srv.accept(), daemon=True).start()
-    code = (f"import socket\ns=socket.socket(socket.AF_UNIX)\n"
-            f"try: s.connect('\\0{name}'); print('connected')\n"
-            f"except OSError as e: print(e.errno)")
+    threading.Thread(target=srv.accept, daemon=True).start()
+    code = (
+        f"import socket\ns=socket.socket(socket.AF_UNIX)\n"
+        f"try: s.connect('\\0{name}'); print('connected')\n"
+        f"except OSError as e: print(e.errno)"
+    )
     try:
         assert run("-c", "python3", "--", "-c", code).stdout.strip() == "1"
     finally:

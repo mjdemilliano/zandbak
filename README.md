@@ -1,16 +1,17 @@
 # devenv
 
-Runs AI coding agents (Claude Code, Gemini CLI, Goose, ...) inside a
+*devenv* is Dutch for sandbox. It runs AI coding agents (Claude Code, Gemini CLI, Goose, ...) inside a
 [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The agent can
 write to the project directory you start it in, and to nothing else you
 haven't listed.
 
 A Python rewrite of [umago/bubblewrap-ai](https://github.com/umago/bubblewrap-ai)
-that fixes the issues from its security review.
+that fixes the issues from its security review. [DESIGN.md](DESIGN.md)
+explains how it works and why.
 
 ## Requirements
 
-Linux, Python 3.11+, `bwrap` (`dnf install bubblewrap` / `apt install bubblewrap`).
+Linux, Python 3.13+, `bwrap` (`dnf install bubblewrap` / `apt install bubblewrap`).
 Linux 6.12+ is recommended (see *Abstract sockets* below).
 
 ## Install
@@ -133,11 +134,15 @@ Read these before you trust it with something important.
 - **Setuid `bwrap`** (some older distros) disables the Landlock protection,
   because Landlock needs `no_new_privs`.
 
-## Tests
+## Development
 
 ```sh
-pip install -e '.[test]' && pytest
+pip install -e '.[dev]'
+ruff format . && ruff check . && mypy && pytest
 ```
+
+Ruff runs with every rule enabled and mypy runs in strict mode. See
+[AGENTS.md](AGENTS.md) for the project rules.
 
 `tests/test_integration.py` runs the real `bwrap` and is skipped where
 bwrap can't run. It covers hidden secrets, read-only git files, quarantine,

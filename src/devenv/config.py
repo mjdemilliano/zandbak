@@ -1,171 +1,204 @@
-"""Configuration loading and validation."""
+"""Load and validate the TOML policy file.
 
-from __future__ import annotations
+The config *is* the security policy, so it is strict: unknown keys, wrong
+types and unsafe paths are errors, never silently replaced by defaults.
+"""
 
+import functools
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from importlib import resources
 from pathlib import Path, PurePosixPath
+from typing import Any
+
+from devenv import APP, devenvError
+
+type Table = dict[str, Any]
+"""A parsed TOML table."""
+
+type Paths = tuple[str, ...]
+"""Normalised relative paths (no leading ``/``, no ``..``)."""
 
 
-class ConfigError(Exception):
-    pass
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HomeConfig:
+    """Which parts of ``$HOME`` the sandbox sees. Paths are relative to ``$HOME``."""
+
+    ro: Paths = ()
+    """Mounted read-only."""
+    rw: Paths = ()
+    """Mounted read-write; changes persist on the host."""
+    ephemeral: Paths = ()
+    """Files copied in; the sandbox's changes are discarded at exit."""
+    protect: Paths = ()
+    """Paths inside ``rw`` entries that are kept read-only or quarantined."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProjectConfig:
+    """Policy for the project directory (where devenv is started)."""
+
+    protect: Paths = ()
+    """Paths relative to the project that are kept read-only or quarantined."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Config:
+    """The complete, validated configuration."""
+
     bwrap_path: str = "bwrap"
+    """bwrap executable, looked up on ``PATH`` unless absolute."""
     command: tuple[str, ...] = ("bash",)
+    """Default command run inside the sandbox."""
     network: bool = True
+    """Whether the sandbox shares the host network."""
     bwrap_extra_args: tuple[str, ...] = ()
+    """Extra bwrap arguments, applied before devenv's protections."""
     env_allow: tuple[str, ...] = ()
-    home_ro: tuple[str, ...] = ()
-    home_rw: tuple[str, ...] = ()
-    home_ephemeral: tuple[str, ...] = ()
-    home_protect: tuple[str, ...] = ()
-    project_protect: tuple[str, ...] = field(default_factory=tuple)
+    """Host environment variables copied into the otherwise empty environment."""
+    home: HomeConfig = field(default_factory=HomeConfig)
+    """The ``[home]`` table."""
+    project: ProjectConfig = field(default_factory=ProjectConfig)
+    """The ``[project]`` table."""
 
 
-# Schema: top-level key -> (section, attribute, type)
-_TOP = {
-    "bwrap_path": ("bwrap_path", str),
-    "command": ("command", list),
-    "network": ("network", bool),
-    "bwrap_extra_args": ("bwrap_extra_args", list),
-    "env_allow": ("env_allow", list),
-}
-_HOME = {
-    "ro": "home_ro",
-    "rw": "home_rw",
-    "ephemeral": "home_ephemeral",
-    "protect": "home_protect",
-}
-_PROJECT = {"protect": "project_protect"}
+def default_text() -> str:
+    """Return the commented default config shipped with the package."""
+    return resources.files(APP).joinpath("defaults.toml").read_text("utf-8")
 
 
-def default_config_text() -> str:
-    return resources.files("devenv").joinpath("defaults.toml").read_text("utf-8")
+def default_path() -> Path:
+    """Return the user's config path, honouring ``$XDG_CONFIG_HOME``."""
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / APP / "config.toml"
 
 
-def default_config_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config"
-    )
-    return Path(base) / "devenv" / "config.toml"
+def normalise(path: str, where: str) -> str:
+    """Return ``path`` as a clean relative path, or raise devenvError.
 
-
-def validate_rel_path(p: str, where: str) -> str:
-    """Return a normalised relative path, or raise ConfigError.
-
-    Rejects absolute paths, '..', empty components and anything that would
-    resolve to the base directory itself.
+    Rejects absolute paths, ``..``, NUL bytes and paths naming the base
+    directory itself, so an entry can never point outside its base.
     """
-    if not isinstance(p, str) or not p:
-        raise ConfigError(f"{where}: paths must be non-empty strings")
-    if "\x00" in p:
-        raise ConfigError(f"{where}: {p!r} contains a NUL byte")
-    pp = PurePosixPath(p)
-    if pp.is_absolute():
-        raise ConfigError(f"{where}: {p!r} must be relative")
-    parts = [x for x in pp.parts if x != "."]
-    if not parts:
-        raise ConfigError(f"{where}: {p!r} refers to the base directory itself")
-    if ".." in parts:
-        raise ConfigError(f"{where}: {p!r} must not contain '..'")
-    return "/".join(parts)
+    if not path or "\x00" in path:
+        raise devenvError(f"{where}: invalid path {path!r}")
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or ".." in pure.parts or pure == PurePosixPath():
+        raise devenvError(f"{where}: {path!r} must be a relative path inside the base directory")
+    return pure.as_posix()
 
 
-def _str_list(value: object, where: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
-        raise ConfigError(f"{where}: expected a list of strings")
+def _check_keys(table: Table, cls: type, where: str) -> None:
+    """Reject keys in ``table`` that are not fields of dataclass ``cls``."""
+    if unknown := table.keys() - {f.name for f in fields(cls)}:
+        raise devenvError(f"unknown key {where}{min(unknown)}")
+
+
+def _table(data: Table, key: str) -> Table:
+    """Return sub-table ``key`` of ``data`` (empty if absent)."""
+    value = data.get(key, {})
+    if not isinstance(value, dict):
+        raise devenvError(f"[{key}] must be a table")
+    return value
+
+
+def _get[T: (str, bool)](table: Table, key: str, default: T) -> T:
+    """Return scalar ``table[key]`` if present, checking it has ``default``'s type."""
+    value = table.get(key, default)
+    if type(value) is not type(default):
+        raise devenvError(f"{key}: expected {type(default).__name__}")
+    return value
+
+
+def _strings(table: Table, key: str, default: tuple[str, ...], where: str) -> tuple[str, ...]:
+    """Return ``table[key]`` as a tuple of strings, or ``default`` if absent."""
+    if key not in table:
+        return default
+    value = table[key]
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise devenvError(f"{where}{key}: expected a list of strings")
     return tuple(value)
 
 
-def _apply(data: dict, values: dict) -> None:
-    for key, val in data.items():
-        if key == "home":
-            if not isinstance(val, dict):
-                raise ConfigError("[home] must be a table")
-            for k, v in val.items():
-                if k not in _HOME:
-                    raise ConfigError(f"unknown key home.{k}")
-                values[_HOME[k]] = _str_list(v, f"home.{k}")
-        elif key == "project":
-            if not isinstance(val, dict):
-                raise ConfigError("[project] must be a table")
-            for k, v in val.items():
-                if k not in _PROJECT:
-                    raise ConfigError(f"unknown key project.{k}")
-                values[_PROJECT[k]] = _str_list(v, f"project.{k}")
-        elif key in _TOP:
-            attr, typ = _TOP[key]
-            if typ is list:
-                values[attr] = _str_list(val, key)
-            elif not isinstance(val, typ):
-                raise ConfigError(f"{key}: expected {typ.__name__}")
-            else:
-                values[attr] = val
-        else:
-            # Unknown keys are errors: a typo in a security setting must not
-            # silently fall back to something else.
-            raise ConfigError(f"unknown key {key}")
+def _paths(table: Table, key: str, default: Paths, where: str) -> Paths:
+    """Like :func:`_strings`, normalising every entry with :func:`normalise`."""
+    return tuple(normalise(p, f"{where}{key}") for p in _strings(table, key, default, where))
 
 
-def _finalise(values: dict) -> Config:
-    for attr in ("home_ro", "home_rw", "home_ephemeral", "home_protect"):
-        values[attr] = tuple(
-            validate_rel_path(p, attr.replace("_", ".", 1)) for p in values[attr]
-        )
-    values["project_protect"] = tuple(
-        validate_rel_path(p, "project.protect") for p in values["project_protect"]
-    )
-    if not values["command"]:
-        raise ConfigError("command must not be empty")
-    if not values["bwrap_path"]:
-        raise ConfigError("bwrap_path must not be empty")
-    for name in values["env_allow"]:
+def _validate(cfg: Config) -> Config:
+    """Check rules that span several fields; return ``cfg`` unchanged."""
+    if not cfg.command or not cfg.bwrap_path:
+        raise devenvError("command and bwrap_path must not be empty")
+    for name in cfg.env_allow:
         if not name or "=" in name or "\x00" in name:
-            raise ConfigError(f"env_allow: invalid variable name {name!r}")
-    mounted = values["home_ro"] + values["home_rw"] + values["home_ephemeral"]
-    dupes = {p for p in mounted if mounted.count(p) > 1}
-    if dupes:
-        raise ConfigError(f"[home]: listed more than once: {sorted(dupes)}")
-    return Config(**values)
+            raise devenvError(f"env_allow: invalid variable name {name!r}")
+    home = cfg.home
+    mounted = [*home.ro, *home.rw, *home.ephemeral]
+    if dupes := {p for p in mounted if mounted.count(p) > 1}:
+        raise devenvError(f"[home]: listed more than once: {sorted(dupes)}")
+    for rw in home.rw:
+        for path in mounted:
+            if path != rw and PurePosixPath(path).is_relative_to(rw):
+                # devenv would follow symlinks the agent can plant inside rw.
+                raise devenvError(
+                    f"[home]: {path!r} is inside writable {rw!r}; "
+                    "use home.protect to keep part of it read-only"
+                )
+    return cfg
 
 
-def parse(text: str, base: Config | None = None) -> Config:
-    """Parse TOML text on top of `base` (defaults if None)."""
+def parse(text: str, base: Config) -> Config:
+    """Parse TOML ``text``; keys it sets replace those of ``base``."""
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"invalid TOML: {e}") from e
-    values = dict(vars(base)) if base is not None else dict(vars(Config()))
-    _apply(data, values)
-    return _finalise(values)
+        raise devenvError(f"invalid TOML: {e}") from e
+    home_t, project_t = _table(data, "home"), _table(data, "project")
+    _check_keys(data, Config, "")
+    _check_keys(home_t, HomeConfig, "home.")
+    _check_keys(project_t, ProjectConfig, "project.")
+    h = base.home
+    return _validate(
+        Config(
+            bwrap_path=_get(data, "bwrap_path", base.bwrap_path),
+            command=_strings(data, "command", base.command, ""),
+            network=_get(data, "network", base.network),
+            bwrap_extra_args=_strings(data, "bwrap_extra_args", base.bwrap_extra_args, ""),
+            env_allow=_strings(data, "env_allow", base.env_allow, ""),
+            home=HomeConfig(
+                ro=_paths(home_t, "ro", h.ro, "home."),
+                rw=_paths(home_t, "rw", h.rw, "home."),
+                ephemeral=_paths(home_t, "ephemeral", h.ephemeral, "home."),
+                protect=_paths(home_t, "protect", h.protect, "home."),
+            ),
+            project=ProjectConfig(
+                protect=_paths(project_t, "protect", base.project.protect, "project."),
+            ),
+        )
+    )
 
 
+@functools.cache
 def defaults() -> Config:
-    return parse(default_config_text(), base=Config())
+    """Return the built-in default configuration."""
+    return parse(default_text(), Config())
 
 
-def load(path: Path | None, *, explicit: bool = False) -> Config:
-    """Load the config file at `path` on top of the defaults.
+def load(path: Path, *, explicit: bool) -> Config:
+    """Load ``path`` on top of the defaults.
 
-    A missing file is fine unless the user named it explicitly.
+    A missing file means "use the defaults", unless the user named it
+    (``explicit``), in which case it is an error.
     """
-    base = defaults()
-    if path is None:
-        return base
     try:
         text = path.read_text("utf-8")
     except FileNotFoundError:
         if explicit:
-            raise ConfigError(f"{path}: file not found") from None
-        return base
+            raise devenvError(f"{path}: file not found") from None
+        return defaults()
     except OSError as e:
-        raise ConfigError(f"{path}: {e}") from e
+        raise devenvError(f"{path}: {e.strerror}") from e
     try:
-        return parse(text, base=base)
-    except ConfigError as e:
-        raise ConfigError(f"{path}: {e}") from e
+        return parse(text, defaults())
+    except devenvError as e:
+        raise devenvError(f"{path}: {e}") from e

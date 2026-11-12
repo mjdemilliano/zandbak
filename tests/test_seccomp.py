@@ -8,26 +8,25 @@ import pytest
 from devenv import seccomp as sc
 
 
-def run_bpf(prog: bytes, nr: int, arch: int, args=(0, 0, 0, 0, 0, 0)) -> int:
-    args = tuple(args) + (0,) * (6 - len(args))
-    data = struct.pack("=iIQ6Q", nr, arch, 0, *args)
-    insns = [struct.unpack("=HBBI", prog[i : i + 8]) for i in range(0, len(prog), 8)]
-    acc = 0
-    pc = 0
-    for _ in range(1000):
+def run_bpf(prog: bytes, nr: int, arch: int, args: tuple[int, ...] = ()) -> int:
+    """Run ``prog`` on a fake ``seccomp_data`` and return the action."""
+    data = struct.pack("=iIQ6Q", nr, arch, 0, *args, *(0,) * (6 - len(args)))
+    insns = list(struct.iter_unpack("=HBBI", prog))
+    acc, pc = 0, 0
+    while True:
         code, jt, jf, k = insns[pc]
-        if code == 0x20:
-            acc = struct.unpack_from("=I", data, k)[0]
-            pc += 1
-        elif code == 0x15:
-            pc += 1 + (jt if acc == k else jf)
-        elif code == 0x35:
-            pc += 1 + (jt if acc >= k else jf)
-        elif code == 0x06:
-            return k
-        else:
-            raise AssertionError(f"unknown opcode {code:#x}")
-    raise AssertionError("no return")
+        match code:
+            case 0x20:
+                (acc,) = struct.unpack_from("=I", data, k)
+                pc += 1
+            case 0x15:
+                pc += 1 + (jt if acc == k else jf)
+            case 0x35:
+                pc += 1 + (jt if acc >= k else jf)
+            case 0x06:
+                return int(k)
+            case _:
+                raise AssertionError(f"unknown opcode {code:#x}")
 
 
 X86 = sc.build_filter("x86_64")
@@ -35,14 +34,18 @@ ARM = sc.build_filter("aarch64")
 
 
 def test_shape():
-    assert len(X86) % 8 == 0 and len(X86) // 8 < 64
-    assert sc.supported("x86_64") and sc.supported("aarch64")
+    assert len(X86) % 8 == 0
+    assert len(X86) // 8 < 64
+    assert sc.supported("x86_64")
+    assert sc.supported("aarch64")
     assert not sc.supported("riscv64")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="riscv64"):
         sc.build_filter("riscv64")
 
 
-@pytest.mark.parametrize("cmd", [sc.TIOCSTI, sc.TIOCLINUX, sc.TIOCSTI | (1 << 32), sc.TIOCSTI | (0xFFFF << 40)])
+@pytest.mark.parametrize(
+    "cmd", [sc.TIOCSTI, sc.TIOCLINUX, sc.TIOCSTI | (1 << 32), sc.TIOCSTI | (0xFFFF << 40)]
+)
 def test_x86_blocks_injection(cmd):
     assert run_bpf(X86, 16, sc.AUDIT_ARCH_X86_64, (0, cmd)) == sc.RET_EPERM
 
@@ -57,7 +60,10 @@ def test_x86_compat_paths():
     assert run_bpf(X86, 54, sc.AUDIT_ARCH_I386, (0, 0x5401)) == sc.RET_ALLOW
     assert run_bpf(X86, 3, sc.AUDIT_ARCH_I386) == sc.RET_ALLOW
     # every x32 syscall is refused
-    assert run_bpf(X86, sc.X32_SYSCALL_BIT | 514, sc.AUDIT_ARCH_X86_64, (0, sc.TIOCSTI)) == sc.RET_EPERM
+    assert (
+        run_bpf(X86, sc.X32_SYSCALL_BIT | 514, sc.AUDIT_ARCH_X86_64, (0, sc.TIOCSTI))
+        == sc.RET_EPERM
+    )
     assert run_bpf(X86, sc.X32_SYSCALL_BIT | 0, sc.AUDIT_ARCH_X86_64) == sc.RET_EPERM
 
 
